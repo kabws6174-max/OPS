@@ -60,10 +60,18 @@ function loadDB() {
 }
 
 function saveDB(data) {
+    const tempFile = `${DB_FILE}.tmp`;
+    const json = JSON.stringify(data, null, 2);
+
     fs.writeFileSync(
-        DB_FILE,
-        JSON.stringify(data, null, 2),
+        tempFile,
+        json,
         'utf8'
+    );
+
+    fs.renameSync(
+        tempFile,
+        DB_FILE
     );
 }
 
@@ -75,7 +83,13 @@ function ensureGuildConfig(db, guildId) {
     if (!db.guildSettings[guildId]) {
         db.guildSettings[guildId] = {
             currencyName: DEFAULT_CURRENCY_NAME,
-            economyChannels: []
+            economyChannels: [],
+            users: {},
+            profile: {
+                name: null,
+                avatar: null,
+                banner: null
+            }
         };
     }
 
@@ -96,16 +110,27 @@ function ensureGuildConfig(db, guildId) {
         .filter(id => /^\d{17,20}$/.test(String(id)))
         .slice(0, MAX_ECONOMY_CHANNELS);
 
+    if (!config.users || typeof config.users !== 'object' || Array.isArray(config.users)) {
+        config.users = {};
+    }
+
+    if (!config.profile || typeof config.profile !== 'object' || Array.isArray(config.profile)) {
+        config.profile = {};
+    }
+
+    if (typeof config.profile.name !== 'string' || !config.profile.name.trim()) {
+        config.profile.name = null;
+    }
+
+    if (typeof config.profile.avatar !== 'string' || !config.profile.avatar.trim()) {
+        config.profile.avatar = null;
+    }
+
+    if (typeof config.profile.banner !== 'string' || !config.profile.banner.trim()) {
+        config.profile.banner = null;
+    }
+
     return config;
-}
-
-function getGuildConfig(guildId) {
-    const db = loadDB();
-    return ensureGuildConfig(db, guildId);
-}
-
-function getCurrencyName(guildId) {
-    return getGuildConfig(guildId).currencyName;
 }
 
 function ensureUser(db, userId) {
@@ -125,6 +150,86 @@ function ensureUser(db, userId) {
         db[userId].lastDaily =
             Number(db[userId].lastDaily) || 0;
     }
+}
+
+function migrateLegacyUsers(db) {
+    if (!db || typeof db !== 'object') return false;
+    if (db._legacyUsersMigrated) return false;
+
+    const legacyUsers = {};
+
+    for (const [key, value] of Object.entries(db)) {
+        if (
+            /^\d{17,20}$/.test(String(key)) &&
+            value &&
+            typeof value === 'object' &&
+            (
+                Object.prototype.hasOwnProperty.call(value, 'balance') ||
+                Object.prototype.hasOwnProperty.call(value, 'lastDaily')
+            )
+        ) {
+            legacyUsers[key] = value;
+        }
+    }
+
+    if (!Object.keys(legacyUsers).length) {
+        db._legacyUsersMigrated = true;
+        return false;
+    }
+
+    if (!db.guildSettings) {
+        db.guildSettings = {};
+    }
+
+    const guildIds = Object.keys(db.guildSettings);
+
+    let targetGuildId = null;
+
+    const guildsWithEconomyRooms = guildIds.filter(guildId => {
+        const settings = db.guildSettings[guildId];
+        return settings &&
+            Array.isArray(settings.economyChannels) &&
+            settings.economyChannels.length > 0;
+    });
+
+    if (guildsWithEconomyRooms.length === 1) {
+        targetGuildId = guildsWithEconomyRooms[0];
+    } else if (guildIds.length === 1) {
+        targetGuildId = guildIds[0];
+    } else if (guildIds.length > 0) {
+        targetGuildId = guildIds[0];
+    }
+
+    if (targetGuildId) {
+        const config = ensureGuildConfig(db, targetGuildId);
+
+        for (const [userId, userData] of Object.entries(legacyUsers)) {
+            if (!config.users[userId]) {
+                config.users[userId] = {
+                    balance: Number(userData.balance) || 0,
+                    lastDaily: Number(userData.lastDaily) || 0
+                };
+            }
+        }
+    }
+
+    db._legacyUsers = legacyUsers;
+    db._legacyUsersMigrated = true;
+
+    for (const userId of Object.keys(legacyUsers)) {
+        delete db[userId];
+    }
+
+    return true;
+}
+
+function getGuildConfig(guildId) {
+    const db = loadDB();
+    return ensureGuildConfig(db, guildId);
+}
+
+function getCurrencyName(guildId) {
+    return getGuildConfig(guildId).currencyName;
 }
 
 function parseAmount(value) {
@@ -333,8 +438,63 @@ async function registerSlashCommands() {
 client.once('ready', async () => {
     console.log('======================================');
     console.log(`✅ البوت اشتغل: ${client.user.tag}`);
-    console.log('💰 نظام العملات أصبح يدعم إعدادات مستقلة لكل سيرفر.');
-    console.log('👤 اسم وصورة وبنر البوت أصبحت مستقلة لكل سيرفر.');
+
+    const startupDB = loadDB();
+
+    if (migrateLegacyUsers(startupDB)) {
+        saveDB(startupDB);
+        console.log('♻️ تم ترحيل بيانات العملات القديمة إلى نظام السيرفرات المنفصل.');
+    }
+
+    for (const guild of client.guilds.cache.values()) {
+        try {
+            const config = ensureGuildConfig(
+                startupDB,
+                guild.id
+            );
+
+            const me =
+                guild.members.me ||
+                await guild.members.fetch(client.user.id).catch(() => null);
+
+            if (!me) continue;
+
+            const profile = config.profile || {};
+
+            const profileUpdate = {};
+
+            if (profile.name) {
+                profileUpdate.nick = profile.name;
+            }
+
+            if (profile.avatar) {
+                profileUpdate.avatar = profile.avatar;
+            }
+
+            if (profile.banner) {
+                profileUpdate.banner = profile.banner;
+            }
+
+            if (Object.keys(profileUpdate).length) {
+                await me.edit(profileUpdate).catch(error => {
+                    console.error(
+                        `❌ تعذر استعادة بروفايل البوت في السيرفر: ${guild.name}`,
+                        error
+                    );
+                });
+            }
+        } catch (error) {
+            console.error(
+                `❌ تعذر تحميل إعدادات السيرفر عند التشغيل: ${guild.name}`,
+                error
+            );
+        }
+    }
+
+    saveDB(startupDB);
+
+    console.log('💰 نظام العملات أصبح محفوظاً ومستقلاً لكل سيرفر.');
+    console.log('👤 اسم وصورة وبنر البوت محفوظة ومستقلة لكل سيرفر.');
     await registerSlashCommands();
     console.log('======================================');
 
@@ -637,6 +797,9 @@ client.on('messageCreate', async message => {
                 message.guild.id
             );
 
+        const guildUsers =
+            guildConfig.users;
+
         if (
             !guildConfig.economyChannels.includes(
                 message.channel.id
@@ -651,19 +814,22 @@ client.on('messageCreate', async message => {
         const userId =
             message.author.id;
 
+        const transferKey =
+            `${message.guild.id}:${userId}`;
+
         ensureUser(
-            db,
+            guildUsers,
             userId
         );
 
         if (
             pendingTransfers.has(
-                userId
+                transferKey
             )
         ) {
             const transferData =
                 pendingTransfers.get(
-                    userId
+                    transferKey
                 );
 
             if (
@@ -672,7 +838,7 @@ client.on('messageCreate', async message => {
                     transferData.code
             ) {
                 pendingTransfers.delete(
-                    userId
+                    transferKey
                 );
 
                 await message.delete()
@@ -687,18 +853,27 @@ client.on('messageCreate', async message => {
                 const transferDB =
                     loadDB();
 
+                const transferConfig =
+                    ensureGuildConfig(
+                        transferDB,
+                        message.guild.id
+                    );
+
+                const transferUsers =
+                    transferConfig.users;
+
                 ensureUser(
-                    transferDB,
+                    transferUsers,
                     userId
                 );
 
                 ensureUser(
-                    transferDB,
+                    transferUsers,
                     transferData.targetId
                 );
 
                 if (
-                    transferDB[userId]
+                    transferUsers[userId]
                         .balance <
                     transferData.amount
                 ) {
@@ -713,11 +888,11 @@ client.on('messageCreate', async message => {
                     });
                 }
 
-                transferDB[userId]
+                transferUsers[userId]
                     .balance -=
                     transferData.amount;
 
-                transferDB[
+                transferUsers[
                     transferData.targetId
                 ].balance +=
                     transferData.amount;
@@ -834,14 +1009,14 @@ client.on('messageCreate', async message => {
 
             if (
                 now -
-                    db[userId].lastDaily <
+                    guildUsers[userId].lastDaily <
                 cooldown
             ) {
                 const remaining =
                     cooldown -
                     (
                         now -
-                        db[userId].lastDaily
+                        guildUsers[userId].lastDaily
                     );
 
                 const hours =
@@ -897,10 +1072,10 @@ client.on('messageCreate', async message => {
                         301
                     ) + 1700;
 
-            db[userId].balance +=
+            guildUsers[userId].balance +=
                 randomAmount;
 
-            db[userId].lastDaily =
+            guildUsers[userId].lastDaily =
                 now;
 
             saveDB(db);
@@ -952,13 +1127,13 @@ client.on('messageCreate', async message => {
                 message.member;
 
             ensureUser(
-                db,
+                guildUsers,
                 targetMember.id
             );
 
             const balance =
                 Number(
-                    db[targetMember.id]
+                    guildUsers[targetMember.id]
                         .balance
                 ) || 0;
 
@@ -1037,7 +1212,7 @@ client.on('messageCreate', async message => {
 
             const currentBalance =
                 Number(
-                    db[userId].balance
+                    guildUsers[userId].balance
                 ) || 0;
 
             if (
@@ -1113,7 +1288,7 @@ client.on('messageCreate', async message => {
                 });
 
             pendingTransfers.set(
-                userId,
+                transferKey,
                 {
                     targetId:
                         targetMember.id,
@@ -1166,7 +1341,7 @@ client.on('messageCreate', async message => {
             }
 
             const sortedUsers =
-                Object.entries(db)
+                Object.entries(guildUsers)
                     .filter(
                         ([, data]) =>
                             Number(
@@ -1237,12 +1412,12 @@ client.on('messageCreate', async message => {
                 targetMember.id;
 
             ensureUser(
-                db,
+                guildUsers,
                 targetId
             );
 
             const userData =
-                db[targetId];
+                guildUsers[targetId];
 
             let lastTimeText =
                 'لم يستلم أبداً';
@@ -1396,11 +1571,11 @@ client.on('messageCreate', async message => {
             }
 
             ensureUser(
-                db,
+                guildUsers,
                 targetMember.id
             );
 
-            db[targetMember.id]
+            guildUsers[targetMember.id]
                 .balance +=
                 amount;
 
@@ -1469,13 +1644,13 @@ client.on('messageCreate', async message => {
             }
 
             ensureUser(
-                db,
+                guildUsers,
                 targetMember.id
             );
 
             const balance =
                 Number(
-                    db[targetMember.id]
+                    guildUsers[targetMember.id]
                         .balance
                 ) || 0;
 
@@ -1520,7 +1695,7 @@ client.on('messageCreate', async message => {
                 amount = balance;
             }
 
-            db[targetMember.id]
+            guildUsers[targetMember.id]
                 .balance =
                 Math.max(
                     0,
@@ -1585,6 +1760,9 @@ client.on(
                         db,
                         interaction.guild.id
                     );
+
+                const guildUsers =
+                    config.users;
 
                 if (
                     interaction.commandName ===
@@ -1877,6 +2055,11 @@ client.on(
                                 attachment.url
                         });
 
+                        config.profile.avatar =
+                            attachment.url;
+
+                        saveDB(db);
+
                         return interaction.editReply({
                             content:
                                 '✅ تم تغيير صورة البوت في هذا السيرفر فقط.'
@@ -1962,6 +2145,11 @@ client.on(
                                 attachment.url
                         });
 
+                        config.profile.banner =
+                            attachment.url;
+
+                        saveDB(db);
+
                         return interaction.editReply({
                             content:
                                 '✅ تم تغيير بنر البوت في هذا السيرفر فقط.'
@@ -2006,6 +2194,12 @@ client.on(
                             avatar: null,
                             banner: null
                         });
+
+                        config.profile.name = null;
+                        config.profile.avatar = null;
+                        config.profile.banner = null;
+
+                        saveDB(db);
 
                         return interaction.editReply({
                             content:
@@ -2076,11 +2270,11 @@ client.on(
                     }
 
                     ensureUser(
-                        db,
+                        guildUsers,
                         targetUser.id
                     );
 
-                    db[targetUser.id]
+                    guildUsers[targetUser.id]
                         .balance +=
                         amount;
 
@@ -2134,13 +2328,13 @@ client.on(
                     }
 
                     ensureUser(
-                        db,
+                        guildUsers,
                         targetUser.id
                     );
 
                     const balance =
                         Number(
-                            db[targetUser.id]
+                            guildUsers[targetUser.id]
                                 .balance
                         ) || 0;
 
@@ -2194,7 +2388,7 @@ client.on(
                         });
                     }
 
-                    db[targetUser.id]
+                    guildUsers[targetUser.id]
                         .balance =
                         Math.max(
                             0,
@@ -2290,6 +2484,11 @@ client.on(
                     await me.edit({
                         nick: name
                     });
+
+                    config.profile.name =
+                        name;
+
+                    saveDB(db);
 
                     return interaction.editReply({
                         content:
@@ -3070,12 +3269,21 @@ client.on(
                 const db =
                     loadDB();
 
+                const rewardConfig =
+                    ensureGuildConfig(
+                        db,
+                        reward.guildId
+                    );
+
+                const rewardUsers =
+                    rewardConfig.users;
+
                 ensureUser(
-                    db,
+                    rewardUsers,
                     reward.targetId
                 );
 
-                db[reward.targetId]
+                rewardUsers[reward.targetId]
                     .balance +=
                     reward.amount;
 
@@ -3668,9 +3876,12 @@ client.on(
                     });
                 }
 
+                const transferKey =
+                    `${interaction.guild.id}:${senderId}`;
+
                 const transfer =
                     pendingTransfers.get(
-                        senderId
+                        transferKey
                     );
 
                 if (!transfer) {
@@ -3684,23 +3895,32 @@ client.on(
                 const db =
                     loadDB();
 
+                const verifyConfig =
+                    ensureGuildConfig(
+                        db,
+                        interaction.guild.id
+                    );
+
+                const verifyUsers =
+                    verifyConfig.users;
+
                 ensureUser(
-                    db,
+                    verifyUsers,
                     senderId
                 );
 
                 ensureUser(
-                    db,
+                    verifyUsers,
                     targetId
                 );
 
                 if (
-                    db[senderId]
+                    verifyUsers[senderId]
                         .balance <
                     amount
                 ) {
                     pendingTransfers.delete(
-                        senderId
+                        transferKey
                     );
 
                     return interaction.reply({
@@ -3728,7 +3948,7 @@ client.on(
                     code;
 
                 pendingTransfers.set(
-                    senderId,
+                    transferKey,
                     transfer
                 );
 
