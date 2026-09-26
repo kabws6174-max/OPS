@@ -27,23 +27,9 @@ const REQUEST_CHANNEL_ID = '1545187326093693038';
 const PREMIUM_ROLE_ID = '1544858160982917261';
 const MASS_SUMMON_ROLE_ID = '1546263383526088805';
 
-// =========================================================
-// PERSISTENT DATABASE
-// =========================================================
-// يمكن في Railway وضع DB_FILE=/data/economy.json بعد ربط Volume
-// وبهذا تبقى العملات والرومات والتوب محفوظة حتى بعد إعادة التشغيل/النشر.
-const DB_FILE = process.env.DB_FILE || './economy.json';
-const DB_BACKUP_FILE = `${DB_FILE}.backup`;
-const DB_TEMP_FILE = `${DB_FILE}.tmp`;
-
-function ensureDBDirectory() {
-    const dir = path.dirname(DB_FILE);
-    if (dir && dir !== '.') {
-        fs.mkdirSync(dir, { recursive: true });
-    }
-}
-
-ensureDBDirectory();
+const DB_FILE = path.join(__dirname, 'economy.json');
+const DB_BACKUP_FILE = path.join(__dirname, 'economy.backup.json');
+const DB_TEMP_FILE = path.join(__dirname, 'economy.tmp.json');
 
 const DEFAULT_CURRENCY_NAME = '𝐎𝐏𝐬';
 const MAX_ECONOMY_CHANNELS = 3;
@@ -59,93 +45,190 @@ const client = new Client({
 });
 
 function loadDB() {
-    ensureDBDirectory();
-
     try {
         if (!fs.existsSync(DB_FILE)) {
             if (fs.existsSync(DB_BACKUP_FILE)) {
-                fs.copyFileSync(DB_BACKUP_FILE, DB_FILE);
+                fs.copyFileSync(
+                    DB_BACKUP_FILE,
+                    DB_FILE
+                );
             } else {
-                fs.writeFileSync(DB_FILE, JSON.stringify({ guildSettings: {}, users: {} }, null, 2), 'utf8');
+                fs.writeFileSync(
+                    DB_FILE,
+                    JSON.stringify({}, null, 2),
+                    'utf8'
+                );
             }
         }
 
-        const raw = fs.readFileSync(DB_FILE, 'utf8').trim();
-        if (!raw) {
-            return { guildSettings: {}, users: {} };
-        }
+        const raw = fs.readFileSync(
+            DB_FILE,
+            'utf8'
+        );
 
         const data = JSON.parse(raw);
-        if (!data || typeof data !== 'object' || Array.isArray(data)) {
-            throw new Error('قاعدة البيانات ليست بصيغة صحيحة.');
-        }
 
-        if (!data.guildSettings || typeof data.guildSettings !== 'object') {
-            data.guildSettings = {};
-        }
-        if (!data.users || typeof data.users !== 'object') {
-            data.users = {};
+        if (
+            !data ||
+            typeof data !== 'object' ||
+            Array.isArray(data)
+        ) {
+            throw new Error('Invalid database format');
         }
 
         return data;
     } catch (error) {
-        console.error('❌ تعذر قراءة قاعدة البيانات:', error.message);
+        console.error(
+            '❌ تعذر قراءة قاعدة البيانات الأساسية، سيتم محاولة استرجاع النسخة الاحتياطية.'
+        );
 
         try {
             if (fs.existsSync(DB_BACKUP_FILE)) {
-                const backupRaw = fs.readFileSync(DB_BACKUP_FILE, 'utf8');
-                const backupData = JSON.parse(backupRaw);
-                if (backupData && typeof backupData === 'object') {
-                    console.log('♻️ تم استرجاع قاعدة البيانات من النسخة الاحتياطية.');
+                const backupData = JSON.parse(
+                    fs.readFileSync(
+                        DB_BACKUP_FILE,
+                        'utf8'
+                    )
+                );
+
+                if (
+                    backupData &&
+                    typeof backupData === 'object' &&
+                    !Array.isArray(backupData)
+                ) {
+                    fs.copyFileSync(
+                        DB_BACKUP_FILE,
+                        DB_FILE
+                    );
+
+                    console.log(
+                        '✅ تم استرجاع قاعدة البيانات من النسخة الاحتياطية.'
+                    );
+
                     return backupData;
                 }
             }
         } catch (backupError) {
-            console.error('❌ تعذر استرجاع النسخة الاحتياطية:', backupError.message);
+            console.error(
+                '❌ تعذر استرجاع النسخة الاحتياطية:',
+                backupError
+            );
         }
 
-        return { guildSettings: {}, users: {} };
+        console.error(
+            '❌ سيتم بدء قاعدة بيانات فارغة فقط لأن ملف البيانات الأساسي والنسخة الاحتياطية غير صالحين.'
+        );
+
+        return {};
     }
 }
 
 function saveDB(data) {
-    ensureDBDirectory();
-
     try {
-        const json = JSON.stringify(data, null, 2);
+        const serialized = JSON.stringify(
+            data,
+            null,
+            2
+        );
 
-        // الكتابة إلى ملف مؤقت أولاً تمنع تلف قاعدة البيانات إذا انقطع البوت أثناء الحفظ.
-        fs.writeFileSync(DB_TEMP_FILE, json, 'utf8');
+        fs.writeFileSync(
+            DB_TEMP_FILE,
+            serialized,
+            'utf8'
+        );
 
-        // الاحتفاظ بآخر نسخة سليمة كنسخة احتياطية.
-        if (fs.existsSync(DB_FILE)) {
-            fs.copyFileSync(DB_FILE, DB_BACKUP_FILE);
+        const tempFd = fs.openSync(
+            DB_TEMP_FILE,
+            'r'
+        );
+
+        try {
+            fs.fsyncSync(tempFd);
+        } finally {
+            fs.closeSync(tempFd);
         }
 
-        // استبدال الملف القديم بالنسخة الجديدة بشكل ذري قدر الإمكان.
-        fs.renameSync(DB_TEMP_FILE, DB_FILE);
+        if (fs.existsSync(DB_FILE)) {
+            fs.copyFileSync(
+                DB_FILE,
+                DB_BACKUP_FILE
+            );
+        }
+
+        if (process.platform === 'win32' && fs.existsSync(DB_FILE)) {
+            fs.unlinkSync(DB_FILE);
+        }
+
+        fs.renameSync(
+            DB_TEMP_FILE,
+            DB_FILE
+        );
     } catch (error) {
-        console.error('❌ تعذر حفظ قاعدة البيانات:', error.message);
+        console.error(
+            '❌ تعذر حفظ بيانات البوت:',
+            error
+        );
+
+        try {
+            if (
+                !fs.existsSync(DB_FILE) &&
+                fs.existsSync(DB_BACKUP_FILE)
+            ) {
+                fs.copyFileSync(
+                    DB_BACKUP_FILE,
+                    DB_FILE
+                );
+            }
+        } catch (restoreError) {
+            console.error(
+                '❌ تعذر استرجاع قاعدة البيانات بعد فشل الحفظ:',
+                restoreError
+            );
+        }
 
         try {
             if (fs.existsSync(DB_TEMP_FILE)) {
                 fs.unlinkSync(DB_TEMP_FILE);
             }
-        } catch (_) {}
+        } catch {}
     }
+}
+
+function ensureGuildConfig(db, guildId) {
+    if (!db.guildSettings) {
+        db.guildSettings = {};
+    }
+
+    if (!db.guildSettings[guildId]) {
+        db.guildSettings[guildId] = {
+            currencyName: DEFAULT_CURRENCY_NAME,
+            economyChannels: []
+        };
+    }
+
+    const config = db.guildSettings[guildId];
+
+    if (
+        typeof config.currencyName !== 'string' ||
+        !config.currencyName.trim()
+    ) {
+        config.currencyName = DEFAULT_CURRENCY_NAME;
+    }
+
+    if (!Array.isArray(config.economyChannels)) {
+        config.economyChannels = [];
+    }
+
+    config.economyChannels = config.economyChannels
+        .filter(id => /^\d{17,20}$/.test(String(id)))
+        .slice(0, MAX_ECONOMY_CHANNELS);
+
+    return config;
 }
 
 function getGuildConfig(guildId) {
     const db = loadDB();
-    const before = JSON.stringify(db.guildSettings?.[guildId] || null);
-    const config = ensureGuildConfig(db, guildId);
-    const after = JSON.stringify(config);
-
-    if (before !== after) {
-        saveDB(db);
-    }
-
-    return config;
+    return ensureGuildConfig(db, guildId);
 }
 
 function getCurrencyName(guildId) {
@@ -367,1172 +450,1244 @@ async function registerSlashCommands() {
             );
         } catch (error) {
             console.error(
-                `❌ فشل تسجيل أوامر السلاش في ${guild.name}:`,
+                `❌ تعذر تسجيل أوامر السلاش في: ${guild.name}`,
                 error
             );
         }
     }
 }
 
-function ensureGuildConfig(db, guildId) {
-    if (!db.guildSettings) {
-        db.guildSettings = {};
-    }
-
-    if (!db.guildSettings[guildId]) {
-        db.guildSettings[guildId] = {
-            currencyName: DEFAULT_CURRENCY_NAME,
-            economyChannels: [],
-            customBotName: null,
-            customBotAvatar: null,
-            customBotBanner: null
-        };
-    }
-
-    const config = db.guildSettings[guildId];
-
-    if (typeof config.currencyName !== 'string' || !config.currencyName.trim()) {
-        config.currencyName = DEFAULT_CURRENCY_NAME;
-    }
-
-    if (!Array.isArray(config.economyChannels)) {
-        config.economyChannels = [];
-    }
-
-    if (!Object.prototype.hasOwnProperty.call(config, 'customBotName')) {
-        config.customBotName = null;
-    }
-
-    if (!Object.prototype.hasOwnProperty.call(config, 'customBotAvatar')) {
-        config.customBotAvatar = null;
-    }
-
-    if (!Object.prototype.hasOwnProperty.call(config, 'customBotBanner')) {
-        config.customBotBanner = null;
-    }
-
-    return config;
-}
-
-function isAdmin(member) {
-    if (!member) return false;
-
-    return (
-        member.permissions.has(PermissionFlagsBits.Administrator) ||
-        member.permissions.has(PermissionFlagsBits.ManageGuild)
-    );
-}
-
-function isEconomyChannel(guildId, channelId) {
-    const config = getGuildConfig(guildId);
-
-    return config.economyChannels.includes(channelId);
-}
-
-function getGuildUsers(db, guildId) {
-    if (!db.users) {
-        db.users = {};
-    }
-
-    if (!db.users[guildId]) {
-        db.users[guildId] = {};
-    }
-
-    return db.users[guildId];
-}
-
-function ensureGuildUser(db, guildId, userId) {
-    const users = getGuildUsers(db, guildId);
-
-    if (!users[userId]) {
-        users[userId] = {
-            balance: 0,
-            lastDaily: 0
-        };
-    }
-
-    if (typeof users[userId].balance !== 'number') {
-        users[userId].balance =
-            Number(users[userId].balance) || 0;
-    }
-
-    if (typeof users[userId].lastDaily !== 'number') {
-        users[userId].lastDaily =
-            Number(users[userId].lastDaily) || 0;
-    }
-
-    return users[userId];
-}
-
-function getTopUsers(db, guildId) {
-    const users = getGuildUsers(db, guildId);
-
-    return Object.entries(users)
-        .filter(([, data]) =>
-            data &&
-            Number.isFinite(Number(data.balance))
-        )
-        .sort(
-            (a, b) =>
-                Number(b[1].balance) -
-                Number(a[1].balance)
-        );
-}
-
-function createTopEmbed(guild, db) {
-    const currencyName =
-        getCurrencyName(guild.id);
-
-    const topUsers =
-        getTopUsers(db, guild.id).slice(0, 10);
-
-    const description =
-        topUsers.length
-            ? topUsers
-                .map(
-                    ([userId, data], index) =>
-                        `**${index + 1}.** <@${userId}> — **${formatAmount(data.balance)} ${currencyName}**`
-                )
-                .join('\n')
-            : 'لا يوجد أي رصيد مسجل حتى الآن.';
-
-    return new EmbedBuilder()
-        .setColor('#D4AC0D')
-        .setTitle('🏆 توب العملات')
-        .setDescription(description)
-        .setFooter({
-            text: guild.name
-        })
-        .setTimestamp();
-}
-
-function getMemberBalance(db, guildId, userId) {
-    const user =
-        ensureGuildUser(
-            db,
-            guildId,
-            userId
-        );
-
-    return Number(user.balance) || 0;
-}
-
-function setMemberBalance(
-    db,
-    guildId,
-    userId,
-    amount
-) {
-    const user =
-        ensureGuildUser(
-            db,
-            guildId,
-            userId
-        );
-
-    user.balance =
-        Math.max(
-            0,
-            Math.floor(
-                Number(amount) || 0
-            )
-        );
-}
-
-function addMemberBalance(
-    db,
-    guildId,
-    userId,
-    amount
-) {
-    const current =
-        getMemberBalance(
-            db,
-            guildId,
-            userId
-        );
-
-    setMemberBalance(
-        db,
-        guildId,
-        userId,
-        current + amount
-    );
-}
-
-function removeMemberBalance(
-    db,
-    guildId,
-    userId,
-    amount
-) {
-    const current =
-        getMemberBalance(
-            db,
-            guildId,
-            userId
-        );
-
-    setMemberBalance(
-        db,
-        guildId,
-        userId,
-        current - amount
-    );
-}
-
-function getDisplayName(member) {
-    return (
-        member?.displayName ||
-        member?.user?.username ||
-        'عضو'
-    );
-}
-
-function getUserMention(userId) {
-    return `<@${userId}>`;
-}
-
-function makeButton(
-    customId,
-    label,
-    style = ButtonStyle.Secondary
-) {
-    return new ButtonBuilder()
-        .setCustomId(customId)
-        .setLabel(label)
-        .setStyle(style);
-}
-
-function buildEconomyButtons() {
-    return new ActionRowBuilder()
-        .addComponents(
-            makeButton(
-                'economy_balance',
-                '💰 الرصيد',
-                ButtonStyle.Secondary
-            ),
-            makeButton(
-                'economy_daily',
-                '🎁 يومي',
-                ButtonStyle.Success
-            ),
-            makeButton(
-                'economy_top',
-                '🏆 التوب',
-                ButtonStyle.Primary
-            ),
-            makeButton(
-                'economy_transfer',
-                '💸 تحويل',
-                ButtonStyle.Secondary
-            )
-        );
-}
-
-function buildTransferModal() {
-    const modal =
-        new ModalBuilder()
-            .setCustomId(
-                'transfer_modal'
-            )
-            .setTitle(
-                '💸 تحويل عملة'
-            );
-
-    const userInput =
-        new TextInputBuilder()
-            .setCustomId(
-                'transfer_user'
-            )
-            .setLabel(
-                'ايدي العضو'
-            )
-            .setPlaceholder(
-                'ضع ايدي العضو هنا'
-            )
-            .setStyle(
-                TextInputStyle.Short
-            )
-            .setRequired(
-                true
-            )
-            .setMaxLength(
-                30
-            );
-
-    const amountInput =
-        new TextInputBuilder()
-            .setCustomId(
-                'transfer_amount'
-            )
-            .setLabel(
-                'المبلغ'
-            )
-            .setPlaceholder(
-                'مثال: 20k أو 2m'
-            )
-            .setStyle(
-                TextInputStyle.Short
-            )
-            .setRequired(
-                true
-            )
-            .setMaxLength(
-                30
-            );
-
-    modal.addComponents(
-        new ActionRowBuilder()
-            .addComponents(
-                userInput
-            ),
-        new ActionRowBuilder()
-            .addComponents(
-                amountInput
-            )
-    );
-
-    return modal;
-}
-
-function buildGiveModal() {
-    const modal =
-        new ModalBuilder()
-            .setCustomId(
-                'give_modal'
-            )
-            .setTitle(
-                '💰 إضافة عملة'
-            );
-
-    const userInput =
-        new TextInputBuilder()
-            .setCustomId(
-                'give_user'
-            )
-            .setLabel(
-                'ايدي العضو'
-            )
-            .setPlaceholder(
-                'ضع ايدي العضو هنا'
-            )
-            .setStyle(
-                TextInputStyle.Short
-            )
-            .setRequired(
-                true
-            )
-            .setMaxLength(
-                30
-            );
-
-    const amountInput =
-        new TextInputBuilder()
-            .setCustomId(
-                'give_amount'
-            )
-            .setLabel(
-                'المبلغ'
-            )
-            .setPlaceholder(
-                'مثال: 20k أو 2m'
-            )
-            .setStyle(
-                TextInputStyle.Short
-            )
-            .setRequired(
-                true
-            )
-            .setMaxLength(
-                30
-            );
-
-    modal.addComponents(
-        new ActionRowBuilder()
-            .addComponents(
-                userInput
-            ),
-        new ActionRowBuilder()
-            .addComponents(
-                amountInput
-            )
-    );
-
-    return modal;
-}
-
-function buildWithdrawModal() {
-    const modal =
-        new ModalBuilder()
-            .setCustomId(
-                'withdraw_modal'
-            )
-            .setTitle(
-                '💸 سحب عملة'
-            );
-
-    const userInput =
-        new TextInputBuilder()
-            .setCustomId(
-                'withdraw_user'
-            )
-            .setLabel(
-                'ايدي العضو'
-            )
-            .setPlaceholder(
-                'ضع ايدي العضو هنا'
-            )
-            .setStyle(
-                TextInputStyle.Short
-            )
-            .setRequired(
-                true
-            )
-            .setMaxLength(
-                30
-            );
-
-    const amountInput =
-        new TextInputBuilder()
-            .setCustomId(
-                'withdraw_amount'
-            )
-            .setLabel(
-                'المبلغ'
-            )
-            .setPlaceholder(
-                'مثال: 20k أو كامل'
-            )
-            .setStyle(
-                TextInputStyle.Short
-            )
-            .setRequired(
-                true
-            )
-            .setMaxLength(
-                30
-            );
-
-    modal.addComponents(
-        new ActionRowBuilder()
-            .addComponents(
-                userInput
-            ),
-        new ActionRowBuilder()
-            .addComponents(
-                amountInput
-            )
-    );
-
-    return modal;
-}
-
-function buildMassSummonModal(guildId) {
-    const modal =
-        new ModalBuilder()
-            .setCustomId(
-                `mass_summon_modal_${guildId}`
-            )
-            .setTitle(
-                '📩 إشعار استدعاء'
-            );
-
-    const destinationInput =
-        new TextInputBuilder()
-            .setCustomId(
-                'mass_summon_destination'
-            )
-            .setLabel(
-                'التوجه'
-            )
-            .setPlaceholder(
-                'اكتب ايدي الروم أو لينك الروم هنا...'
-            )
-            .setStyle(
-                TextInputStyle.Short
-            )
-            .setRequired(
-                true
-            )
-            .setMaxLength(
-                200
-            );
-
-    const reasonInput =
-        new TextInputBuilder()
-            .setCustomId(
-                'mass_summon_reason'
-            )
-            .setLabel(
-                'السبب'
-            )
-            .setPlaceholder(
-                'اكتب سبب الاستدعاء هنا...'
-            )
-            .setStyle(
-                TextInputStyle.Paragraph
-            )
-            .setRequired(
-                true
-            )
-            .setMaxLength(
-                1000
-            );
-
-    modal.addComponents(
-        new ActionRowBuilder()
-            .addComponents(
-                destinationInput
-            ),
-        new ActionRowBuilder()
-            .addComponents(
-                reasonInput
-            )
-    );
-
-    return modal;
-}
-
-function getPremiumMember(member) {
-    if (!member) return false;
-
-    return member.roles.cache.has(
-        PREMIUM_ROLE_ID
-    );
-}
-
-function getMassSummonMember(member) {
-    if (!member) return false;
-
-    return (
-        member.roles.cache.has(
-            MASS_SUMMON_ROLE_ID
-        ) ||
-        member.permissions.has(
-            PermissionFlagsBits.Administrator
-        )
-    );
-}
-
-function cleanText(text, max = 1000) {
-    return String(text || '')
-        .replace(/@everyone/gi, '@\u200beveryone')
-        .replace(/@here/gi, '@\u200bhere')
-        .slice(0, max);
-}
-
-async function sendRequestMessage(guild, message) {
-    try {
-        const channel =
-            guild.channels.cache.get(
-                REQUEST_CHANNEL_ID
-            );
-
-        if (!channel || !channel.isTextBased()) {
-            return false;
-        }
-
-        await channel.send({
-            content: message
-        });
-
-        return true;
-    } catch (error) {
-        console.error(
-            '❌ تعذر إرسال الطلب:',
-            error
-        );
-
-        return false;
-    }
-}
-
-client.once(
-    'ready',
-    async () => {
-        console.log(
-            `✅ تم تسجيل الدخول باسم ${client.user.tag}`
-        );
-
-        await registerSlashCommands();
-
+client.once('ready', async () => {
+    console.log('======================================');
+    console.log(`✅ البوت اشتغل: ${client.user.tag}`);
+    console.log('💰 نظام العملات أصبح يدعم إعدادات مستقلة لكل سيرفر.');
+    console.log('👤 اسم وصورة وبنر البوت أصبحت مستقلة لكل سيرفر.');
+    await registerSlashCommands();
+    console.log('======================================');
+
+    const statuses = [
+        'نظام العملات',
+        'افضل بوت عملات',
+        'سبحان الله وبحمده',
+        'استغفر الله'
+    ];
+
+    let index = 0;
+
+    client.user.setPresence({
+        activities: [
+            {
+                name: 'customstatus',
+                type: 4,
+                state: statuses[index]
+            }
+        ],
+        status: 'online'
+    });
+
+    setInterval(() => {
         client.user.setPresence({
             activities: [
                 {
-                    name: 'نظام العملات',
-                    type: 0
+                    name: 'customstatus',
+                    type: 4,
+                    state: statuses[index]
                 }
             ],
             status: 'online'
         });
+
+        index =
+            (index + 1) %
+            statuses.length;
+    }, 1000);
+});
+
+client.on('guildCreate', async guild => {
+    try {
+        const db = loadDB();
+
+        ensureGuildConfig(
+            db,
+            guild.id
+        );
+
+        saveDB(db);
+
+        await guild.commands.set(
+            slashCommands
+        );
+
+        console.log(
+            `✅ تم تسجيل أوامر السلاش في السيرفر الجديد: ${guild.name}`
+        );
+    } catch (error) {
+        console.error(
+            `❌ تعذر إعداد السيرفر الجديد: ${guild.name}`,
+            error
+        );
     }
-);
+});
 
-client.on(
-    'guildCreate',
-    async guild => {
-        try {
-            const db = loadDB();
+client.on('messageCreate', async message => {
+    try {
+        if (message.author.bot) return;
 
+        const content =
+            message.content.trim();
+
+        if (
+            message.guild &&
+            content.startsWith('استدعاء')
+        ) {
+            if (
+                !message.member.permissions.has(
+                    PermissionFlagsBits.Administrator
+                )
+            ) return;
+
+            const targetUser =
+                message.mentions.users.first();
+
+            if (!targetUser) {
+                return message.channel.send({
+                    embeds: [
+                        new EmbedBuilder()
+                            .setColor('#D4AC0D')
+                            .setDescription(
+                                '❌ الاستخدام الصحيح:\n`استدعاء @العضو`'
+                            )
+                    ]
+                });
+            }
+
+            const targetMember =
+                await message.guild.members
+                    .fetch(targetUser.id)
+                    .catch(() => null);
+
+            if (!targetMember) {
+                return message.channel.send({
+                    embeds: [
+                        new EmbedBuilder()
+                            .setColor('#D4AC0D')
+                            .setDescription(
+                                '❌ العضو غير موجود في السيرفر.'
+                            )
+                    ]
+                });
+            }
+
+            if (targetMember.user.bot) {
+                return message.channel.send({
+                    embeds: [
+                        new EmbedBuilder()
+                            .setColor('#D4AC0D')
+                            .setDescription(
+                                '❌ لا يمكنك استدعاء بوت.'
+                            )
+                    ]
+                });
+            }
+
+            const embed =
+                new EmbedBuilder()
+                    .setColor('#D4AC0D')
+                    .setTitle('📢 نظام الاستدعاء')
+                    .setDescription(
+                        `اضغط على الزر أدناه لإرسال استدعاء إلى ${targetMember}.`
+                    )
+                    .setFooter({
+                        text: message.guild.name
+                    });
+
+            const row =
+                new ActionRowBuilder()
+                    .addComponents(
+                        new ButtonBuilder()
+                            .setCustomId(
+                                `summon_open_${message.author.id}_${targetMember.id}`
+                            )
+                            .setLabel('استدعاء العضو')
+                            .setEmoji('📢')
+                            .setStyle(
+                                ButtonStyle.Secondary
+                            )
+                    );
+
+            return message.channel.send({
+                embeds: [embed],
+                components: [row]
+            });
+        }
+
+        if (
+            message.guild &&
+            content === 'طلب'
+        ) {
+            const embed =
+                new EmbedBuilder()
+                    .setColor('#D4AC0D')
+                    .setTitle('📋 رفع طلب')
+                    .setDescription(
+                        'من هنا يمكنك رفع طلب\nاختر نوع الطلب من القائمة الموجودة بالأسفل.'
+                    )
+                    .setTimestamp();
+
+            const menu =
+                new StringSelectMenuBuilder()
+                    .setCustomId(
+                        `request_menu_${message.author.id}_${Date.now()}`
+                    )
+                    .setPlaceholder(
+                        'اختر نوع الطلب'
+                    )
+                    .addOptions(
+                        {
+                            label: 'رفع طلب عملة',
+                            value: 'currency',
+                            emoji: '💰',
+                            description:
+                                'رفع طلب خاص بالعملة'
+                        },
+                        {
+                            label: 'رفع طلب رتبة',
+                            value: 'role',
+                            emoji: '👑',
+                            description:
+                                'رفع طلب خاص بالرتبة'
+                        },
+                        {
+                            label: 'رفع طلب بنك',
+                            value: 'bank',
+                            emoji: '🏦',
+                            description:
+                                'رفع طلب خاص بالبنك'
+                        }
+                    );
+
+            return message.channel.send({
+                embeds: [embed],
+                components: [
+                    new ActionRowBuilder()
+                        .addComponents(menu)
+                ]
+            });
+        }
+
+        if (
+            message.guild &&
+            content === 'شعار تسليم'
+        ) {
+            if (
+                !message.member.permissions.has(
+                    PermissionFlagsBits.Administrator
+                )
+            ) return;
+
+            return message.channel.send({
+                content:
+                    '📨 اضغط على الزر أدناه لإكمال شعار التسليم.',
+                components: [
+                    new ActionRowBuilder()
+                        .addComponents(
+                            new ButtonBuilder()
+                                .setCustomId(
+                                    `delivery_open_${message.author.id}`
+                                )
+                                .setLabel(
+                                    'شعار تسليم'
+                                )
+                                .setEmoji('📨')
+                                .setStyle(
+                                    ButtonStyle.Secondary
+                                )
+                        )
+                ]
+            });
+        }
+
+        if (
+            message.guild &&
+            (
+                content === 'شعار كل' ||
+                content.toLowerCase() ===
+                    'شعار all' ||
+                content === 'شعار كامل'
+            )
+        ) {
+            if (
+                !message.member.roles.cache.has(
+                    MASS_SUMMON_ROLE_ID
+                )
+            ) return;
+
+            const embed =
+                new EmbedBuilder()
+                    .setColor('#D4AC0D')
+                    .setTitle('📩 إشعار استدعاء')
+                    .setDescription(
+                        'اضغط على الزر أدناه لإرسال إشعار استدعاء إلى جميع أعضاء السيرفر.'
+                    )
+                    .setTimestamp();
+
+            const row =
+                new ActionRowBuilder()
+                    .addComponents(
+                        new ButtonBuilder()
+                            .setCustomId(
+                                `mass_summon_open_${message.author.id}_${message.guild.id}`
+                            )
+                            .setLabel(
+                                'إشعار استدعاء'
+                            )
+                            .setEmoji('📩')
+                            .setStyle(
+                                ButtonStyle.Secondary
+                            )
+                    );
+
+            return message.channel.send({
+                embeds: [embed],
+                components: [row]
+            });
+        }
+
+        if (!message.guild) return;
+
+        const economyDB =
+            loadDB();
+
+        const guildConfig =
             ensureGuildConfig(
-                db,
-                guild.id
+                economyDB,
+                message.guild.id
             );
+
+        if (
+            !guildConfig.economyChannels.includes(
+                message.channel.id
+            )
+        ) {
+            return;
+        }
+
+        const db =
+            economyDB;
+
+        const userId =
+            message.author.id;
+
+        ensureUser(
+            db,
+            userId
+        );
+
+        if (
+            pendingTransfers.has(
+                userId
+            )
+        ) {
+            const transferData =
+                pendingTransfers.get(
+                    userId
+                );
+
+            if (
+                transferData.code &&
+                content ===
+                    transferData.code
+            ) {
+                pendingTransfers.delete(
+                    userId
+                );
+
+                await message.delete()
+                    .catch(() => {});
+
+                if (transferData.botMsg) {
+                    await transferData.botMsg
+                        .delete()
+                        .catch(() => {});
+                }
+
+                const transferDB =
+                    loadDB();
+
+                ensureUser(
+                    transferDB,
+                    userId
+                );
+
+                ensureUser(
+                    transferDB,
+                    transferData.targetId
+                );
+
+                if (
+                    transferDB[userId]
+                        .balance <
+                    transferData.amount
+                ) {
+                    return message.channel.send({
+                        embeds: [
+                            new EmbedBuilder()
+                                .setColor('#D4AC0D')
+                                .setDescription(
+                                    '❌ ليس لديك رصيد كافٍ لإتمام عملية التحويل.'
+                                )
+                        ]
+                    });
+                }
+
+                transferDB[userId]
+                    .balance -=
+                    transferData.amount;
+
+                transferDB[
+                    transferData.targetId
+                ].balance +=
+                    transferData.amount;
+
+                saveDB(
+                    transferDB
+                );
+
+                const targetMember =
+                    await message.guild.members
+                        .fetch(
+                            transferData.targetId
+                        )
+                        .catch(() => null);
+
+                const currencyName =
+                    getCurrencyName(
+                        message.guild.id
+                    );
+
+                const receiptEmbed =
+                    new EmbedBuilder()
+                        .setColor('#D4AC0D')
+                        .setTitle(
+                            'إيصال تحويل'
+                        )
+                        .addFields(
+                            {
+                                name: 'المبلغ',
+                                value:
+                                    `\`\`\`fix\n${formatAmount(
+                                        transferData.amount
+                                    )} ${currencyName}\n\`\`\``
+                            },
+                            {
+                                name: 'إلى',
+                                value:
+                                    `\`\`\`ini\n[ ${
+                                        targetMember
+                                            ? targetMember.user.tag
+                                            : transferData.targetId
+                                    } ]\n\`\`\``
+                            },
+                            {
+                                name: 'من',
+                                value:
+                                    `\`\`\`ini\n[ ${message.author.tag} ]\n\`\`\``
+                            }
+                        )
+                        .setTimestamp();
+
+                await message.author.send({
+                    embeds: [receiptEmbed]
+                }).catch(() => {});
+
+                if (targetMember) {
+                    await targetMember.send({
+                        embeds: [receiptEmbed]
+                    }).catch(() => {});
+                }
+
+                return message.channel.send({
+                    embeds: [
+                        new EmbedBuilder()
+                            .setColor('#D4AC0D')
+                            .setDescription(
+                                `✅ تم التحويل بنجاح بقيمة **${formatAmount(
+                                    transferData.amount
+                                )} ${currencyName}**.`
+                            )
+                    ]
+                });
+            }
+        }
+
+        if (
+            content === 'مكافاة' ||
+            content === 'مكافأة'
+        ) {
+            const accountAge =
+                Date.now() -
+                message.author.createdTimestamp;
+
+            const fourteenDays =
+                14 *
+                24 *
+                60 *
+                60 *
+                1000;
+
+            if (
+                accountAge <
+                fourteenDays
+            ) {
+                return message.channel.send({
+                    embeds: [
+                        new EmbedBuilder()
+                            .setColor('#D4AC0D')
+                            .setDescription(
+                                'لا يمكنك أخذ المكافأة اليومية لأن عمر حسابك أقل من 14 يومًا.'
+                            )
+                    ]
+                });
+            }
+
+            const now =
+                Date.now();
+
+            const cooldown =
+                24 *
+                60 *
+                60 *
+                1000;
+
+            if (
+                now -
+                    db[userId].lastDaily <
+                cooldown
+            ) {
+                const remaining =
+                    cooldown -
+                    (
+                        now -
+                        db[userId].lastDaily
+                    );
+
+                const hours =
+                    Math.floor(
+                        remaining /
+                        (
+                            60 *
+                            60 *
+                            1000
+                        )
+                    );
+
+                const minutes =
+                    Math.floor(
+                        (
+                            remaining %
+                            (
+                                60 *
+                                60 *
+                                1000
+                            )
+                        ) /
+                        (
+                            60 *
+                            1000
+                        )
+                    );
+
+                return message.channel.send({
+                    embeds: [
+                        new EmbedBuilder()
+                            .setColor('#D4AC0D')
+                            .setDescription(
+                                `⏳ لقد استلمت مكافأتك مسبقاً. يمكنك الاستلام بعد **${hours} ساعة و ${minutes} دقيقة**.`
+                            )
+                    ]
+                });
+            }
+
+            const isPremium =
+                message.member.roles.cache.has(
+                    PREMIUM_ROLE_ID
+                );
+
+            const randomAmount =
+                isPremium
+                    ? Math.floor(
+                        Math.random() *
+                        2001
+                    ) + 3000
+                    : Math.floor(
+                        Math.random() *
+                        301
+                    ) + 1700;
+
+            db[userId].balance +=
+                randomAmount;
+
+            db[userId].lastDaily =
+                now;
 
             saveDB(db);
 
-            await guild.commands.set(
-                slashCommands
-            );
-        } catch (error) {
-            console.error(
-                '❌ خطأ عند دخول سيرفر جديد:',
-                error
-            );
+            const currencyName =
+                getCurrencyName(
+                    message.guild.id
+                );
+
+            const rewardEmbed =
+                new EmbedBuilder()
+                    .setColor('#D4AC0D')
+                    .setDescription(
+                        isPremium
+                            ? `🎁 **مكافأة عضو مميز**\n\nلقد حصلت على **${formatAmount(
+                                randomAmount
+                            )} ${currencyName}**`
+                            : `🎁 لقد حصلت على **${formatAmount(
+                                randomAmount
+                            )} ${currencyName}** coin`
+                    );
+
+            return message.channel.send({
+                embeds: [rewardEmbed]
+            });
         }
-    }
-);
 
-client.on(
-    'messageCreate',
-    async message => {
-        try {
-            if (
-                message.author.bot ||
-                !message.guild
-            ) {
-                return;
-            }
+        const currencyCommandName =
+            getCurrencyName(
+                message.guild.id
+            ).toLowerCase();
 
-            if (
-                !isEconomyChannel(
-                    message.guild.id,
-                    message.channel.id
-                )
-            ) {
-                return;
-            }
+        if (
+            content.toLowerCase() ===
+                currencyCommandName ||
+            content.toLowerCase() ===
+                'ops' ||
+            content === 'رصيد' ||
+            content.startsWith('رصيد ') ||
+            content.toLowerCase().startsWith(
+                `${currencyCommandName} `
+            ) ||
+            content.toLowerCase().startsWith(
+                'ops '
+            )
+        ) {
+            const targetMember =
+                message.mentions.members.first() ||
+                message.member;
 
-            const content =
-                message.content.trim();
+            ensureUser(
+                db,
+                targetMember.id
+            );
 
-            if (!content) return;
+            const balance =
+                Number(
+                    db[targetMember.id]
+                        .balance
+                ) || 0;
 
-            const parts =
+            const description =
+                targetMember.id ===
+                message.author.id
+                    ? `رصيدك الحالي : ${formatAmount(
+                        balance
+                    )} ${getCurrencyName(
+                        message.guild.id
+                    )}`
+                    : `رصيد العضو ${targetMember} الحالي : ${formatAmount(
+                        balance
+                    )} ${getCurrencyName(
+                        message.guild.id
+                    )}`;
+
+            return message.channel.send({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor('#D4AC0D')
+                        .setDescription(
+                            description
+                        )
+                ]
+            });
+        }
+
+        if (
+            content.startsWith(
+                'تحويل'
+            )
+        ) {
+            const args =
                 content.split(/\s+/);
 
-            const command =
-                parts[0].toLowerCase();
+            const targetMember =
+                message.mentions.members.first();
 
-            const db =
-                loadDB();
+            const argValue =
+                args[2]
+                    ? args[2].toLowerCase()
+                    : '';
 
-            ensureGuildUser(
-                db,
-                message.guild.id,
+            if (
+                !targetMember ||
+                !argValue
+            ) {
+                return message.channel.send({
+                    embeds: [
+                        new EmbedBuilder()
+                            .setColor('#D4AC0D')
+                            .setDescription(
+                                '❌ الاستخدام الصحيح: `تحويل @منشن المبلغ` أو `تحويل @منشن نص` أو `تحويل @منشن كامل`'
+                            )
+                    ]
+                });
+            }
+
+            if (
+                targetMember.id ===
                 message.author.id
-            );
-
-            if (
-                command === 'رصيدي' ||
-                command === 'رصيد' ||
-                command === 'balance'
             ) {
-                const balance =
-                    getMemberBalance(
-                        db,
-                        message.guild.id,
-                        message.author.id
-                    );
-
-                const currencyName =
-                    getCurrencyName(
-                        message.guild.id
-                    );
-
-                await message.reply({
+                return message.channel.send({
                     embeds: [
                         new EmbedBuilder()
-                            .setColor(
-                                '#D4AC0D'
-                            )
-                            .setTitle(
-                                '💰 رصيدك'
-                            )
+                            .setColor('#D4AC0D')
                             .setDescription(
-                                `رصيدك الحالي هو **${formatAmount(balance)} ${currencyName}**`
+                                '❌ لا يمكنك التحويل لنفسك!'
                             )
                     ]
                 });
-
-                saveDB(db);
-                return;
             }
 
-            if (
-                command === 'توب' ||
-                command === 'top'
-            ) {
-                await message.reply({
-                    embeds: [
-                        createTopEmbed(
-                            message.guild,
-                            db
-                        )
-                    ]
-                });
+            let amount = 0;
 
-                saveDB(db);
-                return;
-            }
+            const currentBalance =
+                Number(
+                    db[userId].balance
+                ) || 0;
 
             if (
-                command === 'يومي' ||
-                command === 'daily'
+                argValue === 'كامل'
             ) {
-                const user =
-                    ensureGuildUser(
-                        db,
-                        message.guild.id,
-                        message.author.id
-                    );
-
-                const now =
-                    Date.now();
-
-                const cooldown =
-                    24 * 60 * 60 * 1000;
-
-                if (
-                    now -
-                    user.lastDaily <
-                    cooldown
-                ) {
-                    const remaining =
-                        cooldown -
-                        (
-                            now -
-                            user.lastDaily
-                        );
-
-                    const hours =
-                        Math.ceil(
-                            remaining /
-                            (60 * 60 * 1000)
-                        );
-
-                    return message.reply({
-                        content:
-                            `⏳ يمكنك استلام اليومي بعد **${hours} ساعة**.`
-                    });
-                }
-
-                const reward =
+                amount =
+                    currentBalance;
+            } else if (
+                argValue === 'نص'
+            ) {
+                amount =
                     Math.floor(
-                        Math.random() *
-                        5000
-                    ) + 1000;
-
-                user.balance +=
-                    reward;
-
-                user.lastDaily =
-                    now;
-
-                saveDB(db);
-
-                const currencyName =
-                    getCurrencyName(
-                        message.guild.id
+                        currentBalance /
+                        2
                     );
-
-                await message.reply({
-                    embeds: [
-                        new EmbedBuilder()
-                            .setColor(
-                                '#D4AC0D'
-                            )
-                            .setTitle(
-                                '🎁 المكافأة اليومية'
-                            )
-                            .setDescription(
-                                `تم إضافة **${formatAmount(reward)} ${currencyName}** إلى رصيدك.`
-                            )
-                    ]
-                });
-
-                return;
-            }
-
-            if (
-                command === 'تحويل' ||
-                command === 'تحويل_عملة' ||
-                command === 'transfer'
-            ) {
-                if (!parts[1] || !parts[2]) {
-                    return message.reply({
-                        content:
-                            '❌ الاستخدام: `تحويل @العضو المبلغ`'
-                    });
-                }
-
-                const mentioned =
-                    message.mentions.users.first();
-
-                const targetId =
-                    mentioned?.id ||
-                    parts[1].replace(/[<@!>]/g, '');
-
-                if (
-                    !/^\d{17,20}$/.test(
-                        targetId
-                    )
-                ) {
-                    return message.reply({
-                        content:
-                            '❌ ايدي العضو غير صحيح.'
-                    });
-                }
-
-                if (
-                    targetId ===
-                    message.author.id
-                ) {
-                    return message.reply({
-                        content:
-                            '❌ لا يمكنك التحويل لنفسك.'
-                    });
-                }
-
-                const amount =
+            } else {
+                amount =
                     parseAmount(
-                        parts[2]
+                        argValue
                     );
+            }
 
-                if (
-                    !Number.isFinite(
-                        amount
-                    ) ||
-                    amount <= 0
-                ) {
-                    return message.reply({
-                        content:
-                            '❌ المبلغ غير صحيح.'
-                    });
-                }
-
-                const balance =
-                    getMemberBalance(
-                        db,
-                        message.guild.id,
-                        message.author.id
-                    );
-
-                if (
-                    balance <
-                    amount
-                ) {
-                    return message.reply({
-                        content:
-                            '❌ رصيدك لا يكفي.'
-                    });
-                }
-
-                pendingTransfers.set(
-                    message.author.id,
-                    {
-                        guildId:
-                            message.guild.id,
-                        targetId,
-                        amount,
-                        code: null,
-                        createdAt:
-                            Date.now()
-                    }
-                );
-
-                const currencyName =
-                    getCurrencyName(
-                        message.guild.id
-                    );
-
-                const row =
-                    new ActionRowBuilder()
-                        .addComponents(
-                            makeButton(
-                                `verify_transfer_${message.author.id}_${targetId}_${amount}`,
-                                'تأكيد التحويل',
-                                ButtonStyle.Success
-                            ),
-                            makeButton(
-                                `cancel_transfer_${message.author.id}`,
-                                'إلغاء',
-                                ButtonStyle.Danger
-                            )
-                        );
-
-                await message.reply({
+            if (
+                isNaN(amount) ||
+                amount <= 0
+            ) {
+                return message.channel.send({
                     embeds: [
                         new EmbedBuilder()
-                            .setColor(
-                                '#D4AC0D'
-                            )
-                            .setTitle(
-                                '💸 تأكيد التحويل'
-                            )
+                            .setColor('#D4AC0D')
                             .setDescription(
-                                `هل تريد تحويل **${formatAmount(amount)} ${currencyName}** إلى <@${targetId}>؟`
-                            )
-                    ],
-                    components: [
-                        row
-                    ]
-                });
-
-                saveDB(db);
-                return;
-            }
-
-            if (
-                command === 'مكافأة' ||
-                command === 'مكافاه' ||
-                command === 'give'
-            ) {
-                if (
-                    !isAdmin(
-                        message.member
-                    )
-                ) {
-                    return;
-                }
-
-                const mentioned =
-                    message.mentions.users.first();
-
-                if (
-                    !mentioned ||
-                    !parts[2]
-                ) {
-                    return message.reply({
-                        content:
-                            '❌ الاستخدام: `مكافأة @العضو المبلغ`'
-                    });
-                }
-
-                const amount =
-                    parseAmount(
-                        parts[2]
-                    );
-
-                if (
-                    !Number.isFinite(
-                        amount
-                    ) ||
-                    amount <= 0
-                ) {
-                    return message.reply({
-                        content:
-                            '❌ المبلغ غير صحيح.'
-                    });
-                }
-
-                addMemberBalance(
-                    db,
-                    message.guild.id,
-                    mentioned.id,
-                    amount
-                );
-
-                saveDB(db);
-
-                const currencyName =
-                    getCurrencyName(
-                        message.guild.id
-                    );
-
-                await message.reply({
-                    content:
-                        `✅ تم إضافة **${formatAmount(amount)} ${currencyName}** إلى رصيد ${mentioned}.`
-                });
-
-                return;
-            }
-
-            if (
-                command === 'سحب' ||
-                command === 'withdraw'
-            ) {
-                if (
-                    !isAdmin(
-                        message.member
-                    )
-                ) {
-                    return;
-                }
-
-                const mentioned =
-                    message.mentions.users.first();
-
-                if (
-                    !mentioned ||
-                    !parts[2]
-                ) {
-                    return message.reply({
-                        content:
-                            '❌ الاستخدام: `سحب @العضو المبلغ`'
-                    });
-                }
-
-                let amount;
-
-                if (
-                    parts[2] === 'كامل' ||
-                    parts[2].toLowerCase() === 'all'
-                ) {
-                    amount =
-                        getMemberBalance(
-                            db,
-                            message.guild.id,
-                            mentioned.id
-                        );
-                } else {
-                    amount =
-                        parseAmount(
-                            parts[2]
-                        );
-                }
-
-                if (
-                    !Number.isFinite(
-                        amount
-                    ) ||
-                    amount <= 0
-                ) {
-                    return message.reply({
-                        content:
-                            '❌ المبلغ غير صحيح.'
-                    });
-                }
-
-                const current =
-                    getMemberBalance(
-                        db,
-                        message.guild.id,
-                        mentioned.id
-                    );
-
-                if (
-                    current <
-                    amount
-                ) {
-                    return message.reply({
-                        content:
-                            '❌ رصيد العضو لا يكفي.'
-                    });
-                }
-
-                removeMemberBalance(
-                    db,
-                    message.guild.id,
-                    mentioned.id,
-                    amount
-                );
-
-                saveDB(db);
-
-                const currencyName =
-                    getCurrencyName(
-                        message.guild.id
-                    );
-
-                await message.reply({
-                    content:
-                        `✅ تم سحب **${formatAmount(amount)} ${currencyName}** من رصيد ${mentioned}.`
-                });
-
-                return;
-            }
-
-            if (
-                command === 'نقاط' ||
-                command === 'points'
-            ) {
-                const balance =
-                    getMemberBalance(
-                        db,
-                        message.guild.id,
-                        message.author.id
-                    );
-
-                const currencyName =
-                    getCurrencyName(
-                        message.guild.id
-                    );
-
-                await message.reply({
-                    content:
-                        `💰 رصيدك: **${formatAmount(balance)} ${currencyName}**`
-                });
-
-                saveDB(db);
-                return;
-            }
-
-            if (
-                command === 'help' ||
-                command === 'مساعدة'
-            ) {
-                const currencyName =
-                    getCurrencyName(
-                        message.guild.id
-                    );
-
-                await message.reply({
-                    embeds: [
-                        new EmbedBuilder()
-                            .setColor(
-                                '#D4AC0D'
-                            )
-                            .setTitle(
-                                '📚 أوامر العملات'
-                            )
-                            .setDescription(
-                                [
-                                    `**رصيد** — عرض رصيدك`,
-                                    `**يومي** — استلام المكافأة اليومية`,
-                                    `**توب** — عرض أعلى الأرصدة`,
-                                    `**تحويل @العضو المبلغ** — تحويل ${currencyName}`,
-                                    `**مكافأة @العضو المبلغ** — إضافة ${currencyName} (للإدارة)`,
-                                    `**سحب @العضو المبلغ** — سحب ${currencyName} (للإدارة)`
-                                ].join('\n')
+                                '❌ يرجى كتابة مبلغ صالح أو كلمة (نص) أو (كامل).\n\nالاختصارات المدعومة: `k` `m` `b` `t`'
                             )
                     ]
                 });
-
-                return;
             }
 
-        } catch (error) {
-            console.error(
-                '❌ Message Error:',
-                error
+            if (
+                currentBalance <
+                amount
+            ) {
+                return message.channel.send({
+                    embeds: [
+                        new EmbedBuilder()
+                            .setColor('#D4AC0D')
+                            .setDescription(
+                                '❌ ليس لديك رصيد كافٍ لإتمام عملية التحويل.'
+                            )
+                    ]
+                });
+            }
+
+            const row =
+                new ActionRowBuilder()
+                    .addComponents(
+                        new ButtonBuilder()
+                            .setCustomId(
+                                `verify_transfer_${userId}_${targetMember.id}_${amount}`
+                            )
+                            .setLabel(
+                                'إظهار رمز التحقق'
+                            )
+                            .setStyle(
+                                ButtonStyle.Secondary
+                            )
+                    );
+
+            const sentMsg =
+                await message.channel.send({
+                    content:
+                        '🔒 يرجى الضغط على الزر أدناه لإظهار رمز التحقق وإرساله في الشات لتأكيد عملية التحويل.',
+                    components: [row]
+                });
+
+            pendingTransfers.set(
+                userId,
+                {
+                    targetId:
+                        targetMember.id,
+                    amount,
+                    code: '',
+                    botMsg: sentMsg
+                }
             );
+
+            return;
         }
+
+        if (
+            content === 'توب' ||
+            content === 'التوب' ||
+            content.toLowerCase() ===
+                'top' ||
+            /^توب\s+[1-5]$/i.test(
+                content
+            )
+        ) {
+            let page = 1;
+
+            if (
+                content.startsWith(
+                    'توب '
+                )
+            ) {
+                page =
+                    parseInt(
+                        content.split(
+                            /\s+/
+                        )[1]
+                    );
+            }
+
+            if (
+                page < 1 ||
+                page > 5
+            ) {
+                return message.channel.send({
+                    embeds: [
+                        new EmbedBuilder()
+                            .setColor('#D4AC0D')
+                            .setDescription(
+                                '❌ صفحات التوب من 1 إلى 5 فقط.'
+                            )
+                    ]
+                });
+            }
+
+            const sortedUsers =
+                Object.entries(db)
+                    .filter(
+                        ([, data]) =>
+                            Number(
+                                data.balance
+                            ) > 0
+                    )
+                    .sort(
+                        (a, b) =>
+                            Number(
+                                b[1].balance
+                            ) -
+                            Number(
+                                a[1].balance
+                            )
+                    );
+
+            const start =
+                (page - 1) *
+                10;
+
+            const pageUsers =
+                sortedUsers.slice(
+                    start,
+                    start + 10
+                );
+
+            let description = '';
+
+            pageUsers.forEach(
+                ([uId, data], index) => {
+                    description +=
+                        `#${start + index + 1} <@${uId}> — **${formatAmount(
+                            data.balance
+                        )} ${getCurrencyName(
+                            message.guild.id
+                        )}**\n`;
+                }
+            );
+
+            if (!description) {
+                description =
+                    `الصفحة **${page}** فارغة.`;
+            }
+
+            return message.channel.send({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor('#D4AC0D')
+                        .setTitle(
+                            `قائمة التوب — الصفحة ${page}`
+                        )
+                        .setDescription(
+                            description
+                        )
+                ]
+            });
+        }
+
+        if (
+            content === 'معلومات' ||
+            content === 'المعلومات'
+        ) {
+            const targetMember =
+                message.mentions.members.first() ||
+                message.member;
+
+            const targetId =
+                targetMember.id;
+
+            ensureUser(
+                db,
+                targetId
+            );
+
+            const userData =
+                db[targetId];
+
+            let lastTimeText =
+                'لم يستلم أبداً';
+
+            let nextTimeText =
+                'متاح الآن';
+
+            if (
+                userData.lastDaily >
+                0
+            ) {
+                const lastDate =
+                    new Date(
+                        userData.lastDaily
+                    );
+
+                lastTimeText =
+                    lastDate.toLocaleString();
+
+                const nextTime =
+                    userData.lastDaily +
+                    24 *
+                    60 *
+                    60 *
+                    1000;
+
+                if (
+                    Date.now() <
+                    nextTime
+                ) {
+                    const diff =
+                        nextTime -
+                        Date.now();
+
+                    const h =
+                        Math.floor(
+                            diff /
+                            (
+                                60 *
+                                60 *
+                                1000
+                            )
+                        );
+
+                    const m =
+                        Math.floor(
+                            (
+                                diff %
+                                (
+                                    60 *
+                                    60 *
+                                    1000
+                                )
+                            ) /
+                            (
+                                60 *
+                                1000
+                            )
+                        );
+
+                    nextTimeText =
+                        `${h} ساعة و ${m} دقيقة`;
+                }
+            }
+
+            return message.channel.send({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor('#D4AC0D')
+                        .setTitle(
+                            'معلومات حسابك'
+                        )
+                        .addFields(
+                            {
+                                name: 'العضو',
+                                value:
+                                    `${targetMember}`
+                            },
+                            {
+                                name: 'رصيدك',
+                                value:
+                                    `${getCurrencyName(
+                                        message.guild.id
+                                    )} ${formatAmount(
+                                        userData.balance
+                                    )}`
+                            },
+                            {
+                                name:
+                                    'آخر مكافأة حصلت عليها',
+                                value:
+                                    lastTimeText
+                            },
+                            {
+                                name:
+                                    'موعد المكافأة القادمة',
+                                value:
+                                    nextTimeText
+                            }
+                        )
+                ]
+            });
+        }
+
+        if (
+            content.startsWith(
+                'اعطي'
+            )
+        ) {
+            if (
+                !message.member.permissions.has(
+                    PermissionFlagsBits.Administrator
+                )
+            ) {
+                return message.channel.send({
+                    embeds: [
+                        new EmbedBuilder()
+                            .setColor('#D4AC0D')
+                            .setDescription(
+                                '❌ هذا الأمر مخصص للإداريين فقط.'
+                            )
+                    ]
+                });
+            }
+
+            const args =
+                content.split(/\s+/);
+
+            const targetMember =
+                message.mentions.members.first();
+
+            const amount =
+                parseAmount(
+                    args[2]
+                );
+
+            if (
+                !targetMember ||
+                isNaN(amount) ||
+                amount <= 0
+            ) {
+                return message.channel.send({
+                    embeds: [
+                        new EmbedBuilder()
+                            .setColor('#D4AC0D')
+                            .setDescription(
+                                '❌ الاستخدام الصحيح: `اعطي @العضو المبلغ`\nمثال: `اعطي @العضو 20k`'
+                            )
+                    ]
+                });
+            }
+
+            ensureUser(
+                db,
+                targetMember.id
+            );
+
+            db[targetMember.id]
+                .balance +=
+                amount;
+
+            saveDB(db);
+
+            return message.channel.send({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor('#D4AC0D')
+                        .setDescription(
+                            `✅ تم إضافة **${formatAmount(
+                                amount
+                            )} ${getCurrencyName(
+                                message.guild.id
+                            )}** إلى رصيد العضو ${targetMember}`
+                        )
+                ]
+            });
+        }
+
+        if (
+            content.startsWith(
+                'سحب'
+            )
+        ) {
+            if (
+                !message.member.permissions.has(
+                    PermissionFlagsBits.Administrator
+                )
+            ) {
+                return message.channel.send({
+                    embeds: [
+                        new EmbedBuilder()
+                            .setColor('#D4AC0D')
+                            .setDescription(
+                                '❌ هذا الأمر مخصص للإداريين فقط.'
+                            )
+                    ]
+                });
+            }
+
+            const args =
+                content.split(/\s+/);
+
+            const targetMember =
+                message.mentions.members.first();
+
+            const argValue =
+                args[2]
+                    ? args[2].toLowerCase()
+                    : '';
+
+            if (
+                !targetMember ||
+                !argValue
+            ) {
+                return message.channel.send({
+                    embeds: [
+                        new EmbedBuilder()
+                            .setColor('#D4AC0D')
+                            .setDescription(
+                                '❌ الاستخدام الصحيح: `سحب @العضو المبلغ` أو `سحب @العضو نص` أو `سحب @العضو كامل`'
+                            )
+                    ]
+                });
+            }
+
+            ensureUser(
+                db,
+                targetMember.id
+            );
+
+            const balance =
+                Number(
+                    db[targetMember.id]
+                        .balance
+                ) || 0;
+
+            let amount = 0;
+
+            if (
+                argValue === 'كامل'
+            ) {
+                amount = balance;
+            } else if (
+                argValue === 'نص'
+            ) {
+                amount =
+                    Math.floor(
+                        balance / 2
+                    );
+            } else {
+                amount =
+                    parseAmount(
+                        argValue
+                    );
+            }
+
+            if (
+                isNaN(amount) ||
+                amount <= 0
+            ) {
+                return message.channel.send({
+                    embeds: [
+                        new EmbedBuilder()
+                            .setColor('#D4AC0D')
+                            .setDescription(
+                                '❌ يرجى كتابة مبلغ صالح أو كلمة (نص) أو (كامل).\n\nالاختصارات المدعومة: `k` `m` `b` `t`'
+                            )
+                    ]
+                });
+            }
+
+            if (
+                amount > balance
+            ) {
+                amount = balance;
+            }
+
+            db[targetMember.id]
+                .balance =
+                Math.max(
+                    0,
+                    balance - amount
+                );
+
+            saveDB(db);
+
+            return message.channel.send({
+                embeds: [
+                    new EmbedBuilder()
+                        .setColor('#D4AC0D')
+                        .setDescription(
+                            `✅ تم سحب **${formatAmount(
+                                amount
+                            )} ${getCurrencyName(
+                                message.guild.id
+                            )}** من رصيد العضو ${targetMember}`
+                        )
+                ]
+            });
+        }
+
+    } catch (error) {
+        console.error(
+            '❌ Message Error:',
+            error
+        );
     }
-);
+});
 
 client.on(
     'interactionCreate',
     async interaction => {
         try {
+
             if (
                 interaction.isChatInputCommand()
             ) {
-                const guild =
-                    interaction.guild;
-
-                if (!guild) {
+                if (!interaction.guild) {
                     return interaction.reply({
                         content:
                             '❌ هذا الأمر يعمل داخل السيرفر فقط.',
@@ -1540,28 +1695,28 @@ client.on(
                     });
                 }
 
-                const member =
-                    interaction.member;
+                if (
+    !(interaction.memberPermissions && interaction.memberPermissions.has(PermissionFlagsBits.Administrator))
+) {
+    return interaction.reply({
+        content: 'ليس لديك صلاحية لاستخدام هذا الأمر.',
+        ephemeral: true
+    });
+}
 
-                const commandName =
-                    interaction.commandName;
+                const db =
+                    loadDB();
+
+                const config =
+                    ensureGuildConfig(
+                        db,
+                        interaction.guild.id
+                    );
 
                 if (
-                    commandName ===
+                    interaction.commandName ===
                     'currency'
                 ) {
-                    if (
-                        !isAdmin(
-                            member
-                        )
-                    ) {
-                        return interaction.reply({
-                            content:
-                                '❌ هذا الأمر للإدارة فقط.',
-                            ephemeral: true
-                        });
-                    }
-
                     const name =
                         interaction.options
                             .getString(
@@ -1570,62 +1725,39 @@ client.on(
                             )
                             .trim();
 
-                    const db =
-                        loadDB();
-
-                    const config =
-                        ensureGuildConfig(
-                            db,
-                            guild.id
-                        );
+                    if (
+                        !name ||
+                        name.length > 20
+                    ) {
+                        return interaction.reply({
+                            content:
+                                '❌ اسم العملة يجب أن يكون بين 1 و20 حرفاً.',
+                            ephemeral: true
+                        });
+                    }
 
                     config.currencyName =
-                        name.slice(
-                            0,
-                            20
-                        );
+                        name;
 
                     saveDB(db);
 
                     return interaction.reply({
                         content:
-                            `✅ تم تغيير اسم العملة إلى **${config.currencyName}** وحفظه في قاعدة البيانات.`,
+                            `✅ تم تغيير اسم العملة في هذا السيرفر إلى **${name}**.`,
                         ephemeral: true
                     });
                 }
 
                 if (
-                    commandName ===
+                    interaction.commandName ===
                     'economy-room'
                 ) {
-                    if (
-                        !isAdmin(
-                            member
-                        )
-                    ) {
-                        return interaction.reply({
-                            content:
-                                '❌ هذا الأمر للإدارة فقط.',
-                            ephemeral: true
-                        });
-                    }
-
                     const subcommand =
                         interaction.options
                             .getSubcommand();
 
-                    const db =
-                        loadDB();
-
-                    const config =
-                        ensureGuildConfig(
-                            db,
-                            guild.id
-                        );
-
                     if (
-                        subcommand ===
-                        'add'
+                        subcommand === 'add'
                     ) {
                         const channel =
                             interaction.options
@@ -1635,37 +1767,50 @@ client.on(
                                 );
 
                         if (
-                            config.economyChannels.includes(
-                                channel.id
-                            )
+                            !channel.isTextBased()
                         ) {
                             return interaction.reply({
                                 content:
-                                    '⚠️ هذا الروم مفعّل بالفعل.',
+                                    '❌ يجب اختيار روم كتابي.',
                                 ephemeral: true
                             });
                         }
 
                         if (
-                            config.economyChannels.length >=
-                            MAX_ECONOMY_CHANNELS
+                            config.economyChannels
+                                .includes(
+                                    channel.id
+                                )
                         ) {
                             return interaction.reply({
                                 content:
-                                    `❌ لا يمكنك تفعيل أكثر من ${MAX_ECONOMY_CHANNELS} رومات للعملات.`,
+                                    'ℹ️ هذا الروم مفعّل بالفعل لأوامر العملة.',
                                 ephemeral: true
                             });
                         }
 
-                        config.economyChannels.push(
-                            channel.id
-                        );
+                        if (
+                            config.economyChannels
+                                .length >=
+                            MAX_ECONOMY_CHANNELS
+                        ) {
+                            return interaction.reply({
+                                content:
+                                    `❌ لا يمكنك تفعيل أكثر من **${MAX_ECONOMY_CHANNELS} رومات** للعملة في السيرفر.`,
+                                ephemeral: true
+                            });
+                        }
+
+                        config.economyChannels
+                            .push(
+                                channel.id
+                            );
 
                         saveDB(db);
 
                         return interaction.reply({
                             content:
-                                `✅ تم تفعيل ${channel} كروم للعملات وتم حفظ الإعداد.`,
+                                `✅ تم تفعيل أوامر العملة في ${channel}.\n💰 الرومات المفعلة: **${config.economyChannels.length}/${MAX_ECONOMY_CHANNELS}**`,
                             ephemeral: true
                         });
                     }
@@ -1682,30 +1827,32 @@ client.on(
                                 );
 
                         const index =
-                            config.economyChannels.indexOf(
-                                channel.id
-                            );
+                            config.economyChannels
+                                .indexOf(
+                                    channel.id
+                                );
 
                         if (
                             index === -1
                         ) {
                             return interaction.reply({
                                 content:
-                                    '⚠️ هذا الروم غير مفعّل.',
+                                    '❌ هذا الروم غير مفعّل لأوامر العملة.',
                                 ephemeral: true
                             });
                         }
 
-                        config.economyChannels.splice(
-                            index,
-                            1
-                        );
+                        config.economyChannels
+                            .splice(
+                                index,
+                                1
+                            );
 
                         saveDB(db);
 
                         return interaction.reply({
                             content:
-                                `✅ تم تعطيل ${channel} وحفظ التغيير.`,
+                                `✅ تم تعطيل أوامر العملة في ${channel}.`,
                             ephemeral: true
                         });
                     }
@@ -1714,68 +1861,58 @@ client.on(
                         subcommand ===
                         'list'
                     ) {
-                        const list =
-                            config.economyChannels
-                                .map(
-                                    id =>
-                                        `<#${id}>`
-                                );
+                        const channels =
+                            config
+                                .economyChannels
+                                .length
+                                ? config
+                                    .economyChannels
+                                    .map(
+                                        id =>
+                                            `<#${id}>`
+                                    )
+                                    .join(
+                                        '\n'
+                                    )
+                                : 'لا توجد رومات مفعلة حالياً.';
 
                         return interaction.reply({
-                            embeds: [
-                                new EmbedBuilder()
-                                    .setColor(
-                                        '#D4AC0D'
-                                    )
-                                    .setTitle(
-                                        '⚙️ رومات العملات المفعلة'
-                                    )
-                                    .setDescription(
-                                        list.length
-                                            ? list.join('\n')
-                                            : 'لا يوجد رومات مفعلة.'
-                                    )
-                            ],
+                            content:
+                                `💰 **رومات العملة المفعلة**\n\n${channels}\n\n**${config.economyChannels.length}/${MAX_ECONOMY_CHANNELS}**`,
                             ephemeral: true
                         });
                     }
                 }
 
+                /*
+                =========================================================
+                BOT NAME - SERVER ONLY
+                =========================================================
+                */
+
                 if (
-                    commandName ===
+                    interaction.commandName ===
                     'bot-name'
                 ) {
-                    if (
-                        !isAdmin(
-                            member
-                        )
-                    ) {
-                        return interaction.reply({
-                            content:
-                                '❌ هذا الأمر للإدارة فقط.',
-                            ephemeral: true
-                        });
-                    }
-
                     const modal =
                         new ModalBuilder()
                             .setCustomId(
-                                `bot_name_modal_${guild.id}`
+                                `bot_name_modal_${interaction.user.id}`
                             )
                             .setTitle(
-                                '✏️ تغيير اسم البوت'
+                                '👤 تغيير اسم البوت'
                             );
 
-                    const input =
+                    const nameInput =
                         new TextInputBuilder()
                             .setCustomId(
                                 'bot_name'
                             )
                             .setLabel(
-                                'اسم البوت'
+                                'اسم البوت الجديد'
                             )
                             .setPlaceholder(
-                                'اكتب الاسم الجديد'
+                                'اكتب اسم البوت هنا...'
                             )
                             .setStyle(
                                 TextInputStyle.Short
@@ -1790,7 +1927,7 @@ client.on(
                     modal.addComponents(
                         new ActionRowBuilder()
                             .addComponents(
-                                input
+                                nameInput
                             )
                     );
 
@@ -1799,237 +1936,232 @@ client.on(
                     );
                 }
 
+                /*
+                =========================================================
+                BOT AVATAR - SERVER ONLY
+                =========================================================
+                */
+
                 if (
-                    commandName ===
+                    interaction.commandName ===
                     'bot-avatar'
                 ) {
-                    if (
-                        !isAdmin(
-                            member
-                        )
-                    ) {
-                        return interaction.reply({
-                            content:
-                                '❌ هذا الأمر للإدارة فقط.',
-                            ephemeral: true
-                        });
-                    }
-
-                    const image =
+                    const attachment =
                         interaction.options
                             .getAttachment(
                                 'image',
                                 true
                             );
 
-                    const db =
-                        loadDB();
+                    const allowedTypes = [
+                        'image/png',
+                        'image/jpeg',
+                        'image/jpg',
+                        'image/webp',
+                        'image/gif'
+                    ];
 
-                    const config =
-                        ensureGuildConfig(
-                            db,
-                            guild.id
-                        );
+                    if (
+                        attachment.contentType &&
+                        !allowedTypes.includes(
+                            attachment.contentType
+                        )
+                    ) {
+                        return interaction.reply({
+                            content:
+                                '❌ يجب اختيار صورة بصيغة PNG أو JPG أو WEBP أو GIF.',
+                            ephemeral: true
+                        });
+                    }
 
-                    config.customBotAvatar =
-                        image.url;
+                    if (
+                        attachment.size >
+                        10 *
+                        1024 *
+                        1024
+                    ) {
+                        return interaction.reply({
+                            content:
+                                '❌ حجم الصورة كبير جداً. الحد الأقصى 10MB.',
+                            ephemeral: true
+                        });
+                    }
 
-                    saveDB(db);
+                    await interaction.deferReply({
+                        ephemeral: true
+                    });
 
                     try {
-                        await client.user.setAvatar(
-                            image.url
-                        );
+                        const me =
+                            interaction.guild.members.me ||
+                            await interaction.guild.members
+                                .fetch(
+                                    client.user.id
+                                );
+
+                        await me.edit({
+                            avatar:
+                                attachment.url
+                        });
+
+                        return interaction.editReply({
+                            content:
+                                '✅ تم تغيير صورة البوت في هذا السيرفر فقط.'
+                        });
                     } catch (error) {
                         console.error(
-                            '❌ فشل تغيير صورة البوت:',
+                            '❌ Guild Avatar Error:',
                             error
                         );
-                    }
 
-                    return interaction.reply({
-                        content:
-                            '✅ تم حفظ صورة البوت لهذا السيرفر.',
-                        ephemeral: true
-                    });
-                }
-
-                if (
-                    commandName ===
-                    'bot-banner'
-                ) {
-                    if (
-                        !isAdmin(
-                            member
-                        )
-                    ) {
-                        return interaction.reply({
+                        return interaction.editReply({
                             content:
-                                '❌ هذا الأمر للإدارة فقط.',
-                            ephemeral: true
+                                '❌ تعذر تغيير صورة البوت في هذا السيرفر. تأكد من أن إصدار discord.js حديث وأن البوت يستطيع تعديل ملفه داخل السيرفر.'
                         });
                     }
+                }
 
-                    const image =
+                /*
+                =========================================================
+                BOT BANNER - SERVER ONLY
+                =========================================================
+                */
+
+                if (
+                    interaction.commandName ===
+                    'bot-banner'
+                ) {
+                    const attachment =
                         interaction.options
                             .getAttachment(
                                 'image',
                                 true
                             );
 
-                    const db =
-                        loadDB();
+                    const allowedTypes = [
+                        'image/png',
+                        'image/jpeg',
+                        'image/jpg',
+                        'image/webp',
+                        'image/gif'
+                    ];
 
-                    const config =
-                        ensureGuildConfig(
-                            db,
-                            guild.id
-                        );
+                    if (
+                        attachment.contentType &&
+                        !allowedTypes.includes(
+                            attachment.contentType
+                        )
+                    ) {
+                        return interaction.reply({
+                            content:
+                                '❌ يجب اختيار صورة بصيغة PNG أو JPG أو WEBP أو GIF.',
+                            ephemeral: true
+                        });
+                    }
 
-                    config.customBotBanner =
-                        image.url;
+                    if (
+                        attachment.size >
+                        10 *
+                        1024 *
+                        1024
+                    ) {
+                        return interaction.reply({
+                            content:
+                                '❌ حجم الصورة كبير جداً. الحد الأقصى 10MB.',
+                            ephemeral: true
+                        });
+                    }
 
-                    saveDB(db);
-
-                    return interaction.reply({
-                        content:
-                            '✅ تم حفظ بنر البوت لهذا السيرفر.',
+                    await interaction.deferReply({
                         ephemeral: true
                     });
+
+                    try {
+                        const me =
+                            interaction.guild.members.me ||
+                            await interaction.guild.members
+                                .fetch(
+                                    client.user.id
+                                );
+
+                        await me.edit({
+                            banner:
+                                attachment.url
+                        });
+
+                        return interaction.editReply({
+                            content:
+                                '✅ تم تغيير بنر البوت في هذا السيرفر فقط.'
+                        });
+                    } catch (error) {
+                        console.error(
+                            '❌ Guild Banner Error:',
+                            error
+                        );
+
+                        return interaction.editReply({
+                            content:
+                                '❌ تعذر تغيير بنر البوت في هذا السيرفر. تأكد من أن Discord يسمح للبوت باستخدام Banner وأن الصورة صالحة.'
+                        });
+                    }
                 }
 
+                /*
+                =========================================================
+                REST - RESET SERVER PROFILE ONLY
+                =========================================================
+                */
+
                 if (
-                    commandName ===
+                    interaction.commandName ===
                     'rest'
                 ) {
-                    if (
-                        !isAdmin(
-                            member
-                        )
-                    ) {
-                        return interaction.reply({
-                            content:
-                                '❌ هذا الأمر للإدارة فقط.',
-                            ephemeral: true
-                        });
-                    }
-
-                    const db =
-                        loadDB();
-
-                    const config =
-                        ensureGuildConfig(
-                            db,
-                            guild.id
-                        );
-
-                    config.customBotName =
-                        null;
-
-                    config.customBotAvatar =
-                        null;
-
-                    config.customBotBanner =
-                        null;
-
-                    saveDB(db);
-
-                    return interaction.reply({
-                        content:
-                            '✅ تم إرجاع إعدادات البوت لهذا السيرفر للوضع الأساسي وحفظ التغيير.',
+                    await interaction.deferReply({
                         ephemeral: true
                     });
+
+                    try {
+                        const me =
+                            interaction.guild.members.me ||
+                            await interaction.guild.members
+                                .fetch(
+                                    client.user.id
+                                );
+
+                        await me.edit({
+                            nick: null,
+                            avatar: null,
+                            banner: null
+                        });
+
+                        return interaction.editReply({
+                            content:
+                                '✅ تم إرجاع اسم وصورة وبنر البوت للوضع الأساسي في هذا السيرفر فقط.'
+                        });
+                    } catch (error) {
+                        console.error(
+                            '❌ Reset Guild Profile Error:',
+                            error
+                        );
+
+                        return interaction.editReply({
+                            content:
+                                '❌ تعذر إرجاع بروفايل البوت في هذا السيرفر.'
+                        });
+                    }
                 }
 
+                /*
+                =========================================================
+                GIVE
+                =========================================================
+                */
+
                 if (
-                    commandName ===
+                    interaction.commandName ===
                     'give'
                 ) {
-                    if (
-                        !isAdmin(
-                            member
-                        )
-                    ) {
-                        return interaction.reply({
-                            content:
-                                '❌ هذا الأمر للإدارة فقط.',
-                            ephemeral: true
-                        });
-                    }
-
-                    const target =
-                        interaction.options
-                            .getUser(
-                                'member',
-                                true
-                            );
-
-                    const amountText =
-                        interaction.options
-                            .getString(
-                                'amount',
-                                true
-                            );
-
-                    const amount =
-                        parseAmount(
-                            amountText
-                        );
-
-                    if (
-                        !Number.isFinite(
-                            amount
-                        ) ||
-                        amount <= 0
-                    ) {
-                        return interaction.reply({
-                            content:
-                                '❌ المبلغ غير صحيح.',
-                            ephemeral: true
-                        });
-                    }
-
-                    const db =
-                        loadDB();
-
-                    addMemberBalance(
-                        db,
-                        guild.id,
-                        target.id,
-                        amount
-                    );
-
-                    saveDB(db);
-
-                    const currencyName =
-                        getCurrencyName(
-                            guild.id
-                        );
-
-                    return interaction.reply({
-                        content:
-                            `✅ تمت إضافة **${formatAmount(amount)} ${currencyName}** إلى ${target}.`,
-                            ephemeral: true
-                    });
-                }
-
-                if (
-                    commandName ===
-                    'withdraw'
-                ) {
-                    if (
-                        !isAdmin(
-                            member
-                        )
-                    ) {
-                        return interaction.reply({
-                            content:
-                                '❌ هذا الأمر للإدارة فقط.',
-                            ephemeral: true
-                        });
-                    }
-
-                    const target =
+                    const targetUser =
                         interaction.options
                             .getUser(
                                 'member',
@@ -2044,22 +2176,117 @@ client.on(
                             )
                             .trim();
 
-                    const db =
-                        loadDB();
+                    if (
+                        targetUser.bot
+                    ) {
+                        return interaction.reply({
+                            content:
+                                '❌ لا يمكنك إعطاء عملة لبوت.',
+                            ephemeral: true
+                        });
+                    }
 
-                    let amount;
+                    const amount =
+                        parseAmount(
+                            amountText
+                        );
 
                     if (
-                        amountText.toLowerCase() ===
-                        'all' ||
+                        isNaN(amount) ||
+                        amount <= 0
+                    ) {
+                        return interaction.reply({
+                            content:
+                                '❌ المبلغ غير صحيح.\nمثال: `20k` أو `2m` أو `500`.',
+                            ephemeral: true
+                        });
+                    }
+
+                    ensureUser(
+                        db,
+                        targetUser.id
+                    );
+
+                    db[targetUser.id]
+                        .balance +=
+                        amount;
+
+                    saveDB(db);
+
+                    return interaction.reply({
+                        content:
+                            `✅ تم إضافة **${formatAmount(
+                                amount
+                            )} ${getCurrencyName(
+                                interaction.guild.id
+                            )}** إلى رصيد <@${targetUser.id}>.`,
+                        ephemeral: true
+                    });
+                }
+
+                /*
+                =========================================================
+                WITHDRAW
+                =========================================================
+                */
+
+                if (
+                    interaction.commandName ===
+                    'withdraw'
+                ) {
+                    const targetUser =
+                        interaction.options
+                            .getUser(
+                                'member',
+                                true
+                            );
+
+                    const amountText =
+                        interaction.options
+                            .getString(
+                                'amount',
+                                true
+                            )
+                            .trim()
+                            .toLowerCase();
+
+                    if (
+                        targetUser.bot
+                    ) {
+                        return interaction.reply({
+                            content:
+                                '❌ لا يمكنك سحب عملة من بوت.',
+                            ephemeral: true
+                        });
+                    }
+
+                    ensureUser(
+                        db,
+                        targetUser.id
+                    );
+
+                    const balance =
+                        Number(
+                            db[targetUser.id]
+                                .balance
+                        ) || 0;
+
+                    let amount = 0;
+
+                    if (
                         amountText ===
                         'كامل'
                     ) {
                         amount =
-                            getMemberBalance(
-                                db,
-                                guild.id,
-                                target.id
+                            balance;
+                    } else if (
+                        amountText ===
+                        'نص'
+                    ) {
+                        amount =
+                            Math.floor(
+                                balance /
+                                2
                             );
                     } else {
                         amount =
@@ -2069,920 +2296,1574 @@ client.on(
                     }
 
                     if (
-                        !Number.isFinite(
-                            amount
-                        ) ||
+                        isNaN(amount) ||
                         amount <= 0
                     ) {
                         return interaction.reply({
                             content:
-                                '❌ المبلغ غير صحيح.',
+                                '❌ المبلغ غير صحيح.\nاستخدم مبلغاً مثل `20k` أو `2m` أو استخدم `نص` أو `كامل`.',
                             ephemeral: true
                         });
                     }
 
-                    const current =
-                        getMemberBalance(
-                            db,
-                            guild.id,
-                            target.id
-                        );
-
                     if (
-                        current <
-                        amount
+                        amount >
+                        balance
                     ) {
                         return interaction.reply({
                             content:
-                                '❌ رصيد العضو لا يكفي.',
+                                `❌ رصيد العضو غير كافٍ. رصيده الحالي **${formatAmount(
+                                    balance
+                                )} ${getCurrencyName(
+                                    interaction.guild.id
+                                )}**.`,
                             ephemeral: true
                         });
                     }
 
-                    removeMemberBalance(
-                        db,
-                        guild.id,
-                        target.id,
-                        amount
-                    );
+                    db[targetUser.id]
+                        .balance =
+                        Math.max(
+                            0,
+                            balance -
+                                amount
+                        );
 
                     saveDB(db);
 
-                    const currencyName =
-                        getCurrencyName(
-                            guild.id
+                    return interaction.reply({
+                        content:
+                            `✅ تم سحب **${formatAmount(
+                                amount
+                            )} ${getCurrencyName(
+                                interaction.guild.id
+                            )}** من رصيد <@${targetUser.id}>.`,
+                        ephemeral: true
+                    });
+                }
+            }
+
+            /*
+            =========================================================
+            BOT NAME MODAL - SERVER ONLY
+            =========================================================
+            */
+
+            if (
+                interaction.isModalSubmit() &&
+                interaction.customId.startsWith(
+                    'bot_name_modal_'
+                )
+            ) {
+                const ownerId =
+                    interaction.customId
+                        .split('_')[3];
+
+                if (
+                    interaction.user.id !==
+                    ownerId
+                ) {
+                    return interaction.reply({
+                        content:
+                            '❌ هذا الطلب ليس مخصصاً لك.',
+                        ephemeral: true
+                    });
+                }
+
+                if (
+    !(
+        interaction.memberPermissions &&
+        interaction.memberPermissions.has(
+            PermissionFlagsBits.Administrator
+        )
+    )
+) {
+    return interaction.reply({
+        content: '❌ هذا الأمر مخصص للإداريين فقط.',
+        ephemeral: true
+    });
+}
+
+                const name =
+                    interaction.fields
+                        .getTextInputValue(
+                            'bot_name'
+                        )
+                        .trim();
+
+                if (
+                    !name ||
+                    name.length > 32
+                ) {
+                    return interaction.reply({
+                        content:
+                            '❌ اسم البوت يجب أن يكون بين 1 و32 حرفاً.',
+                        ephemeral: true
+                    });
+                }
+
+                await interaction.deferReply({
+                    ephemeral: true
+                });
+
+                try {
+                    const me =
+                        interaction.guild.members.me ||
+                        await interaction.guild.members
+                            .fetch(
+                                client.user.id
+                            );
+
+                    await me.edit({
+                        nick: name
+                    });
+
+                    return interaction.editReply({
+                        content:
+                            `✅ تم تغيير اسم البوت إلى **${name}** في هذا السيرفر فقط.`
+                    });
+                } catch (error) {
+                    console.error(
+                        '❌ Guild Name Error:',
+                        error
+                    );
+
+                    return interaction.editReply({
+                        content:
+                            '❌ تعذر تغيير اسم البوت في هذا السيرفر. تأكد من أن للبوت صلاحية تغيير الاسم وأن رتبة البوت تسمح بذلك.'
+                    });
+                }
+            }
+
+            /*
+            =========================================================
+            DELIVERY OPEN
+            =========================================================
+            */
+
+            if (
+                interaction.isButton() &&
+                interaction.customId.startsWith(
+                    'delivery_open_'
+                )
+            ) {
+                const adminId =
+                    interaction.customId
+                        .split('_')[2];
+
+                if (
+                    interaction.user.id !==
+                    adminId
+                ) {
+                    return interaction.reply({
+                        content:
+                            '❌ هذا الزر ليس مخصصاً لك.',
+                        ephemeral: true
+                    });
+                }
+
+                if (
+                    !interaction.member.permissions.has(
+                        PermissionFlagsBits.Administrator
+                    )
+                ) {
+                    return interaction.reply({
+                        content:
+                            '❌ هذا الأمر مخصص للإداريين فقط.',
+                        ephemeral: true
+                    });
+                }
+
+                const modal =
+                    new ModalBuilder()
+                        .setCustomId(
+                            `delivery_modal_${adminId}`
+                        )
+                        .setTitle(
+                            '📨 شعار تسليم'
                         );
+
+                const memberInput =
+                    new TextInputBuilder()
+                        .setCustomId(
+                            'delivery_member_id'
+                        )
+                        .setLabel(
+                            'ايدي العضو'
+                        )
+                        .setPlaceholder(
+                            'اكتب ايدي العضو هنا...'
+                        )
+                        .setStyle(
+                            TextInputStyle.Short
+                        )
+                        .setRequired(
+                            true
+                        )
+                        .setMaxLength(
+                            25
+                        );
+
+                const amountInput =
+                    new TextInputBuilder()
+                        .setCustomId(
+                            'delivery_amount'
+                        )
+                        .setLabel(
+                            'المبلغ'
+                        )
+                        .setPlaceholder(
+                            'مثال: 20k أو 2m'
+                        )
+                        .setStyle(
+                            TextInputStyle.Short
+                        )
+                        .setRequired(
+                            true
+                        )
+                        .setMaxLength(
+                            30
+                        );
+
+                const reasonInput =
+                    new TextInputBuilder()
+                        .setCustomId(
+                            'delivery_reason'
+                        )
+                        .setLabel(
+                            'السبب'
+                        )
+                        .setPlaceholder(
+                            'اكتب سبب التسليم هنا...'
+                        )
+                        .setStyle(
+                            TextInputStyle.Paragraph
+                        )
+                        .setRequired(
+                            true
+                        )
+                        .setMaxLength(
+                            1000
+                        );
+
+                modal.addComponents(
+                    new ActionRowBuilder()
+                        .addComponents(
+                            memberInput
+                        ),
+                    new ActionRowBuilder()
+                        .addComponents(
+                            amountInput
+                        ),
+                    new ActionRowBuilder()
+                        .addComponents(
+                            reasonInput
+                        )
+                );
+
+                return interaction.showModal(
+                    modal
+                );
+            }
+
+            /*
+            =========================================================
+            DELIVERY MODAL
+            =========================================================
+            */
+
+            if (
+                interaction.isModalSubmit() &&
+                interaction.customId.startsWith(
+                    'delivery_modal_'
+                )
+            ) {
+                const adminId =
+                    interaction.customId
+                        .split('_')[2];
+
+                if (
+                    interaction.user.id !==
+                    adminId
+                ) {
+                    return interaction.reply({
+                        content:
+                            '❌ هذا الطلب ليس مخصصاً لك.',
+                        ephemeral: true
+                    });
+                }
+
+                if (
+                    !interaction.member.permissions.has(
+                        PermissionFlagsBits.Administrator
+                    )
+                ) {
+                    return interaction.reply({
+                        content:
+                            '❌ هذا الأمر مخصص للإداريين فقط.',
+                        ephemeral: true
+                    });
+                }
+
+                const memberId =
+                    interaction.fields
+                        .getTextInputValue(
+                            'delivery_member_id'
+                        )
+                        .trim();
+
+                const amountText =
+                    interaction.fields
+                        .getTextInputValue(
+                            'delivery_amount'
+                        )
+                        .trim();
+
+                const reason =
+                    interaction.fields
+                        .getTextInputValue(
+                            'delivery_reason'
+                        )
+                        .trim();
+
+                if (
+                    !/^\d{17,20}$/.test(
+                        memberId
+                    )
+                ) {
+                    return interaction.reply({
+                        content:
+                            '❌ ايدي العضو غير صحيح.',
+                        ephemeral: true
+                    });
+                }
+
+                const amount =
+                    parseAmount(
+                        amountText
+                    );
+
+                if (
+                    isNaN(amount) ||
+                    amount <= 0
+                ) {
+                    return interaction.reply({
+                        content:
+                            '❌ المبلغ غير صحيح.',
+                        ephemeral: true
+                    });
+                }
+
+                const targetMember =
+                    await interaction.guild.members
+                        .fetch(
+                            memberId
+                        )
+                        .catch(
+                            () => null
+                        );
+
+                if (!targetMember) {
+                    return interaction.reply({
+                        content:
+                            '❌ العضو غير موجود في السيرفر.',
+                        ephemeral: true
+                    });
+                }
+
+                const rewardId =
+                    `${interaction.user.id}_${targetMember.id}_${Date.now()}_${Math.floor(
+                        Math.random() * 100000
+                    )}`;
+
+                pendingRewards.set(
+                    rewardId,
+                    {
+                        targetId:
+                            targetMember.id,
+                        amount,
+                        reason,
+                        guildId:
+                            interaction.guild.id
+                    }
+                );
+
+                const currencyName =
+                    getCurrencyName(
+                        interaction.guild.id
+                    );
+
+                const rewardEmbed =
+                    new EmbedBuilder()
+                        .setColor('#D4AC0D')
+                        .setTitle(
+                            '📨 إشعار استلام مكافأة'
+                        )
+                        .addFields(
+                            {
+                                name:
+                                    'المبلغ',
+                                value:
+                                    `**${formatAmount(
+                                        amount
+                                    )} ${currencyName}**`
+                            },
+                            {
+                                name:
+                                    'السبب',
+                                value:
+                                    reason
+                            }
+                        )
+                        .setTimestamp();
+
+                const row =
+                    new ActionRowBuilder()
+                        .addComponents(
+                            new ButtonBuilder()
+                                .setCustomId(
+                                    `reward_receive_${rewardId}`
+                                )
+                                .setLabel(
+                                    'استلام المكافأة'
+                                )
+                                .setEmoji(
+                                    '📩'
+                                )
+                                .setStyle(
+                                    ButtonStyle.Secondary
+                                )
+                        );
+
+                try {
+                    await targetMember.send({
+                        embeds: [
+                            rewardEmbed
+                        ],
+                        components: [
+                            row
+                        ]
+                    });
 
                     return interaction.reply({
                         content:
-                            `✅ تم سحب **${formatAmount(amount)} ${currencyName}** من ${target}.`,
+                            `✅ تم إرسال شعار التسليم إلى ${targetMember}.`,
                         ephemeral: true
                     });
+                } catch {
+                    pendingRewards.delete(
+                        rewardId
+                    );
+
+                    return interaction.reply({
+                        content:
+                            '❌ تعذر إرسال شعار التسليم في الخاص للعضو.',
+                        ephemeral: true
+                    });
+                }
+            }
+
+            /*
+            =========================================================
+            REQUEST MENU
+            =========================================================
+            */
+
+            if (
+                interaction.isStringSelectMenu() &&
+                interaction.customId.startsWith(
+                    'request_menu_'
+                )
+            ) {
+                const requestType =
+                    interaction.values[0];
+
+                const typeNames = {
+                    currency:
+                        'رفع طلب عملة',
+                    role:
+                        'رفع طلب رتبة',
+                    bank:
+                        'رفع طلب بنك'
+                };
+
+                const modal =
+                    new ModalBuilder()
+                        .setCustomId(
+                            `request_modal_${requestType}_${interaction.user.id}`
+                        )
+                        .setTitle(
+                            typeNames[
+                                requestType
+                            ]
+                        );
+
+                const memberIdInput =
+                    new TextInputBuilder()
+                        .setCustomId(
+                            'request_member_id'
+                        )
+                        .setLabel(
+                            'ايدي العضو'
+                        )
+                        .setPlaceholder(
+                            'اكتب ايدي العضو هنا...'
+                        )
+                        .setStyle(
+                            TextInputStyle.Short
+                        )
+                        .setRequired(
+                            true
+                        )
+                        .setMaxLength(
+                            25
+                        );
+
+                const reasonInput =
+                    new TextInputBuilder()
+                        .setCustomId(
+                            'request_reason'
+                        )
+                        .setLabel(
+                            'السبب'
+                        )
+                        .setPlaceholder(
+                            'اكتب سبب الطلب هنا...'
+                        )
+                        .setStyle(
+                            TextInputStyle.Paragraph
+                        )
+                        .setRequired(
+                            true
+                        )
+                        .setMaxLength(
+                            1000
+                        );
+
+                modal.addComponents(
+                    new ActionRowBuilder()
+                        .addComponents(
+                            memberIdInput
+                        ),
+                    new ActionRowBuilder()
+                        .addComponents(
+                            reasonInput
+                        )
+                );
+
+                return interaction.showModal(
+                    modal
+                );
+            }
+
+            /*
+            =========================================================
+            REQUEST MODAL
+            =========================================================
+            */
+
+            if (
+                interaction.isModalSubmit() &&
+                interaction.customId.startsWith(
+                    'request_modal_'
+                )
+            ) {
+                const parts =
+                    interaction.customId
+                        .split('_');
+
+                const requestType =
+                    parts[2];
+
+                const memberId =
+                    interaction.fields
+                        .getTextInputValue(
+                            'request_member_id'
+                        )
+                        .trim();
+
+                const reason =
+                    interaction.fields
+                        .getTextInputValue(
+                            'request_reason'
+                        )
+                        .trim();
+
+                if (
+                    !/^\d{17,20}$/.test(
+                        memberId
+                    )
+                ) {
+                    return interaction.reply({
+                        content:
+                            '❌ ايدي العضو غير صحيح.',
+                        ephemeral: true
+                    });
+                }
+
+                const typeNames = {
+                    currency:
+                        'رفع طلب عملة',
+                    role:
+                        'رفع طلب رتبة',
+                    bank:
+                        'رفع طلب بنك'
+                };
+
+                const requestChannel =
+                    await client.channels
+                        .fetch(
+                            REQUEST_CHANNEL_ID
+                        )
+                        .catch(
+                            () => null
+                        );
+
+                if (
+                    !requestChannel ||
+                    !requestChannel.isTextBased()
+                ) {
+                    return interaction.reply({
+                        content:
+                            '❌ روم الطلبات غير موجود أو لا يمكنني الكتابة فيه.',
+                        ephemeral: true
+                    });
+                }
+
+                let memberText =
+                    `<@${memberId}>`;
+
+                if (
+                    interaction.guild
+                ) {
+                    const member =
+                        await interaction.guild.members
+                            .fetch(
+                                memberId
+                            )
+                            .catch(
+                                () => null
+                            );
+
+                    if (member) {
+                        memberText =
+                            `${member} \`(${member.user.tag})\``;
+                    }
+                }
+
+                const requestEmbed =
+                    new EmbedBuilder()
+                        .setColor('#D4AC0D')
+                        .setTitle(
+                            '📋 طلب جديد'
+                        )
+                        .addFields(
+                            {
+                                name:
+                                    'نوع الطلب',
+                                value:
+                                    `**${
+                                        typeNames[
+                                            requestType
+                                        ] ||
+                                        requestType
+                                    }**`
+                            },
+                            {
+                                name:
+                                    'العضو',
+                                value:
+                                    memberText
+                            },
+                            {
+                                name:
+                                    'ايدي العضو',
+                                value:
+                                    `\`${memberId}\``
+                            },
+                            {
+                                name:
+                                    'السبب',
+                                value:
+                                    reason
+                            },
+                            {
+                                name:
+                                    'مقدم الطلب',
+                                value:
+                                    `${interaction.user}`
+                            }
+                        )
+                        .setTimestamp();
+
+                const requestRow =
+                    new ActionRowBuilder()
+                        .addComponents(
+                            new ButtonBuilder()
+                                .setCustomId(
+                                    `request_status_delivered_${interaction.user.id}`
+                                )
+                                .setLabel(
+                                    'تم التسليم'
+                                )
+                                .setEmoji(
+                                    '✅'
+                                )
+                                .setStyle(
+                                    ButtonStyle.Success
+                                ),
+                            new ButtonBuilder()
+                                .setCustomId(
+                                    `request_status_not_delivered_${interaction.user.id}`
+                                )
+                                .setLabel(
+                                    'لم يتم التسليم'
+                                )
+                                .setEmoji(
+                                    '❌'
+                                )
+                                .setStyle(
+                                    ButtonStyle.Danger
+                                )
+                        );
+
+                await requestChannel.send({
+                    embeds: [
+                        requestEmbed
+                    ],
+                    components: [
+                        requestRow
+                    ]
+                });
+
+                return interaction.reply({
+                    content:
+                        '✅ تم إرسال الطلب بنجاح.',
+                    ephemeral: true
+                });
+            }
+
+            /*
+            =========================================================
+            REQUEST STATUS
+            =========================================================
+            */
+
+            if (
+                interaction.isButton() &&
+                (
+                    interaction.customId.startsWith(
+                        'request_status_delivered_'
+                    ) ||
+                    interaction.customId.startsWith(
+                        'request_status_not_delivered_'
+                    )
+                )
+            ) {
+                if (
+                    !interaction.member.permissions.has(
+                        PermissionFlagsBits.Administrator
+                    )
+                ) {
+                    return interaction.reply({
+                        content:
+                            '❌ هذا الزر مخصص للإداريين فقط.',
+                        ephemeral: true
+                    });
+                }
+
+                const isDelivered =
+                    interaction.customId.startsWith(
+                        'request_status_delivered_'
+                    );
+
+                const statusText =
+                    isDelivered
+                        ? '✅ **تم التسليم**'
+                        : '❌ **لم يتم التسليم**';
+
+                const currentEmbed =
+                    interaction.message
+                        .embeds[0];
+
+                const updatedEmbed =
+                    EmbedBuilder
+                        .from(
+                            currentEmbed
+                        )
+                        .addFields({
+                            name:
+                                'حالة الطلب',
+                            value:
+                                statusText
+                        })
+                        .setFooter({
+                            text:
+                                `تم تحديث الحالة بواسطة ${interaction.user.tag}`
+                        })
+                        .setTimestamp();
+
+                const disabledRow =
+                    new ActionRowBuilder()
+                        .addComponents(
+                            new ButtonBuilder()
+                                .setCustomId(
+                                    `request_status_done_${interaction.message.id}`
+                                )
+                                .setLabel(
+                                    'تم التسليم'
+                                )
+                                .setEmoji(
+                                    '✅'
+                                )
+                                .setStyle(
+                                    ButtonStyle.Success
+                                )
+                                .setDisabled(
+                                    true
+                                ),
+                            new ButtonBuilder()
+                                .setCustomId(
+                                    `request_status_done_not_${interaction.message.id}`
+                                )
+                                .setLabel(
+                                    'لم يتم التسليم'
+                                )
+                                .setEmoji(
+                                    '❌'
+                                )
+                                .setStyle(
+                                    ButtonStyle.Danger
+                                )
+                                .setDisabled(
+                                    true
+                                )
+                        );
+
+                await interaction.update({
+                    embeds: [
+                        updatedEmbed
+                    ],
+                    components: [
+                        disabledRow
+                    ]
+                });
+
+                return;
+            }
+
+            /*
+            =========================================================
+            REWARD RECEIVE
+            =========================================================
+            */
+
+            if (
+                interaction.isButton() &&
+                interaction.customId.startsWith(
+                    'reward_receive_'
+                )
+            ) {
+                const rewardId =
+                    interaction.customId.replace(
+                        'reward_receive_',
+                        ''
+                    );
+
+                const reward =
+                    pendingRewards.get(
+                        rewardId
+                    );
+
+                if (!reward) {
+                    return interaction.reply({
+                        content:
+                            '❌ إشعار المكافأة انتهى أو تم استلامه مسبقاً.',
+                        ephemeral: true
+                    });
+                }
+
+                if (
+                    interaction.user.id !==
+                    reward.targetId
+                ) {
+                    return interaction.reply({
+                        content:
+                            '❌ هذا الإشعار ليس مخصصاً لك.',
+                        ephemeral: true
+                    });
+                }
+
+                const db =
+                    loadDB();
+
+                ensureUser(
+                    db,
+                    reward.targetId
+                );
+
+                db[reward.targetId]
+                    .balance +=
+                    reward.amount;
+
+                saveDB(db);
+
+                pendingRewards.delete(
+                    rewardId
+                );
+
+                const currencyName =
+                    getCurrencyName(
+                        reward.guildId
+                    );
+
+                const receivedEmbed =
+                    new EmbedBuilder()
+                        .setColor('#D4AC0D')
+                        .setTitle(
+                            '📨 تم استلام المكافأة'
+                        )
+                        .setDescription(
+                            `تمت إضافة **${formatAmount(
+                                reward.amount
+                            )} ${currencyName}** إلى رصيدك بنجاح.\n\n**السبب :** ${reward.reason}\n**رصيدك الحالي :** ${formatAmount(
+                                db[
+                                    reward.targetId
+                                ].balance
+                            )} ${currencyName}`
+                        )
+                        .setTimestamp();
+
+                return interaction.update({
+                    embeds: [
+                        receivedEmbed
+                    ],
+                    components: [
+                        new ActionRowBuilder()
+                            .addComponents(
+                                new ButtonBuilder()
+                                    .setCustomId(
+                                        `reward_received_${rewardId}`
+                                    )
+                                    .setLabel(
+                                        'تم استلام المكافأة'
+                                    )
+                                    .setEmoji(
+                                        '✅'
+                                    )
+                                    .setStyle(
+                                        ButtonStyle.Secondary
+                                    )
+                                    .setDisabled(
+                                        true
+                                    )
+                            )
+                    ]
+                });
+            }
+
+            /*
+            =========================================================
+            SUMMON OPEN
+            =========================================================
+            */
+
+            if (
+                interaction.isButton() &&
+                interaction.customId.startsWith(
+                    'summon_open_'
+                )
+            ) {
+                const parts =
+                    interaction.customId
+                        .split('_');
+
+                const adminId =
+                    parts[2];
+
+                const targetId =
+                    parts[3];
+
+                if (
+                    interaction.user.id !==
+                    adminId
+                ) {
+                    return interaction.reply({
+                        content:
+                            '❌ هذا الزر ليس مخصصاً لك.',
+                        ephemeral: true
+                    });
+                }
+
+                if (
+                    !interaction.member.permissions.has(
+                        PermissionFlagsBits.Administrator
+                    )
+                ) {
+                    return interaction.reply({
+                        content:
+                            '❌ هذا الأمر مخصص للإداريين فقط.',
+                        ephemeral: true
+                    });
+                }
+
+                const modal =
+                    new ModalBuilder()
+                        .setCustomId(
+                            `summon_modal_${adminId}_${targetId}`
+                        )
+                        .setTitle(
+                            '📩 إشعار استدعاء'
+                        );
+
+                const destinationInput =
+                    new TextInputBuilder()
+                        .setCustomId(
+                            'summon_destination'
+                        )
+                        .setLabel(
+                            'التوجه'
+                        )
+                        .setPlaceholder(
+                            'اكتب ايدي الروم أو لينك الروم هنا...'
+                        )
+                        .setStyle(
+                            TextInputStyle.Short
+                        )
+                        .setRequired(
+                            true
+                        )
+                        .setMaxLength(
+                            200
+                        );
+
+                const reasonInput =
+                    new TextInputBuilder()
+                        .setCustomId(
+                            'summon_reason'
+                        )
+                        .setLabel(
+                            'السبب'
+                        )
+                        .setPlaceholder(
+                            'اكتب سبب الاستدعاء هنا...'
+                        )
+                        .setStyle(
+                            TextInputStyle.Paragraph
+                        )
+                        .setRequired(
+                            true
+                        )
+                        .setMaxLength(
+                            1000
+                        );
+
+                modal.addComponents(
+                    new ActionRowBuilder()
+                        .addComponents(
+                            destinationInput
+                        ),
+                    new ActionRowBuilder()
+                        .addComponents(
+                            reasonInput
+                        )
+                );
+
+                return interaction.showModal(
+                    modal
+                );
+            }
+
+            /*
+            =========================================================
+            SUMMON MODAL
+            =========================================================
+            */
+
+            if (
+                interaction.isModalSubmit() &&
+                interaction.customId.startsWith(
+                    'summon_modal_'
+                )
+            ) {
+                const parts =
+                    interaction.customId
+                        .split('_');
+
+                const adminId =
+                    parts[2];
+
+                const targetId =
+                    parts[3];
+
+                if (
+                    interaction.user.id !==
+                    adminId
+                ) {
+                    return interaction.reply({
+                        content:
+                            '❌ هذا الاستدعاء ليس مخصصاً لك.',
+                        ephemeral: true
+                    });
+                }
+
+                if (
+                    !interaction.member.permissions.has(
+                        PermissionFlagsBits.Administrator
+                    )
+                ) {
+                    return interaction.reply({
+                        content:
+                            '❌ هذا الأمر مخصص للإداريين فقط.',
+                        ephemeral: true
+                    });
+                }
+
+                const destination =
+                    interaction.fields
+                        .getTextInputValue(
+                            'summon_destination'
+                        )
+                        .trim();
+
+                const reason =
+                    interaction.fields
+                        .getTextInputValue(
+                            'summon_reason'
+                        )
+                        .trim();
+
+                const validChannelId =
+                    /^\d{17,20}$/.test(
+                        destination
+                    );
+
+                const validChannelLink =
+                    /^https?:\/\/(?:www\.)?discord(?:app)?\.com\/channels\/\d+\/\d+(?:\/\d+)?$/i.test(
+                        destination
+                    );
+
+                if (
+                    !validChannelId &&
+                    !validChannelLink
+                ) {
+                    return interaction.reply({
+                        content:
+                            '❌ التوجه يجب أن يكون ايدي روم صحيح أو لينك روم صحيح.',
+                        ephemeral: true
+                    });
+                }
+
+                const targetMember =
+                    await interaction.guild.members
+                        .fetch(
+                            targetId
+                        )
+                        .catch(
+                            () => null
+                        );
+
+                if (!targetMember) {
+                    return interaction.reply({
+                        content:
+                            '❌ العضو غير موجود في السيرفر.',
+                        ephemeral: true
+                    });
+                }
+
+                let destinationText =
+                    destination;
+
+                if (
+                    validChannelId
+                ) {
+                    destinationText =
+                        `<#${destination}>`;
+                }
+
+                const summonEmbed =
+                    new EmbedBuilder()
+                        .setColor('#D4AC0D')
+                        .setTitle(
+                            '📩 إشعار استدعاء'
+                        )
+                        .addFields(
+                            {
+                                name:
+                                    '🌐 السيرفر',
+                                value:
+                                    `**${interaction.guild.name}**`
+                            },
+                            {
+                                name:
+                                    '📍 التوجه',
+                                value:
+                                    destinationText
+                            },
+                            {
+                                name:
+                                    '📌 السبب',
+                                value:
+                                    reason
+                            }
+                        )
+                        .setFooter({
+                            text:
+                                'نظام الاستدعاء'
+                        })
+                        .setTimestamp();
+
+                try {
+                    await targetMember.send({
+                        embeds: [
+                            summonEmbed
+                        ]
+                    });
+
+                    return interaction.reply({
+                        content:
+                            `✅ تم إرسال إشعار الاستدعاء إلى ${targetMember}.`,
+                        ephemeral: true
+                    });
+                } catch {
+                    return interaction.reply({
+                        content:
+                            '❌ تعذر إرسال الاستدعاء في الخاص. قد تكون رسائل الخاص مغلقة لدى العضو.',
+                        ephemeral: true
+                    });
+                }
+            }
+
+            /*
+            =========================================================
+            MASS SUMMON OPEN
+            =========================================================
+            */
+
+            if (
+                interaction.isButton() &&
+                interaction.customId.startsWith(
+                    'mass_summon_open_'
+                )
+            ) {
+                const parts =
+                    interaction.customId
+                        .split('_');
+
+                const adminId =
+                    parts[3];
+
+                if (
+                    interaction.user.id !==
+                    adminId
+                ) {
+                    return interaction.reply({
+                        content:
+                            '❌ هذا الزر ليس مخصصاً لك.',
+                        ephemeral: true
+                    });
+                }
+
+                if (
+                    !interaction.member.roles.cache.has(
+                        MASS_SUMMON_ROLE_ID
+                    )
+                ) {
+                    return interaction.reply({
+                        content:
+                            '❌ هذا الأمر ليس متاحاً لك.',
+                        ephemeral: true
+                    });
+                }
+
+                const modal =
+                    new ModalBuilder()
+                        .setCustomId(
+                            `mass_summon_modal_${interaction.guild.id}`
+                        )
+                        .setTitle(
+                            '📩 إشعار استدعاء'
+                        );
+
+                const destinationInput =
+                    new TextInputBuilder()
+                        .setCustomId(
+                            'mass_summon_destination'
+                        )
+                        .setLabel(
+                            'التوجه'
+                        )
+                        .setPlaceholder(
+                            'اكتب ايدي الروم أو لينك الروم هنا...'
+                        )
+                        .setStyle(
+                            TextInputStyle.Short
+                        )
+                        .setRequired(
+                            true
+                        )
+                        .setMaxLength(
+                            200
+                        );
+
+                const reasonInput =
+                    new TextInputBuilder()
+                        .setCustomId(
+                            'mass_summon_reason'
+                        )
+                        .setLabel(
+                            'السبب'
+                        )
+                        .setPlaceholder(
+                            'اكتب سبب الاستدعاء هنا...'
+                        )
+                        .setStyle(
+                            TextInputStyle.Paragraph
+                        )
+                        .setRequired(
+                            true
+                        )
+                        .setMaxLength(
+                            1000
+                        );
+
+                modal.addComponents(
+                    new ActionRowBuilder()
+                        .addComponents(
+                            destinationInput
+                        ),
+                    new ActionRowBuilder()
+                        .addComponents(
+                            reasonInput
+                        )
+                );
+
+                return interaction.showModal(
+                    modal
+                );
+            }
+
+            /*
+            =========================================================
+            MASS SUMMON MODAL
+            =========================================================
+            */
+
+            if (
+                interaction.isModalSubmit() &&
+                interaction.customId.startsWith(
+                    'mass_summon_modal_'
+                )
+            ) {
+                const destination =
+                    interaction.fields
+                        .getTextInputValue(
+                            'mass_summon_destination'
+                        )
+                        .trim();
+
+                const reason =
+                    interaction.fields
+                        .getTextInputValue(
+                            'mass_summon_reason'
+                        )
+                        .trim();
+
+                const validChannelId =
+                    /^\d{17,20}$/.test(
+                        destination
+                    );
+
+                const validChannelLink =
+                    /^https?:\/\/(?:www\.)?discord(?:app)?\.com\/channels\/\d+\/\d+(?:\/\d+)?$/i.test(
+                        destination
+                    );
+
+                if (
+                    !validChannelId &&
+                    !validChannelLink
+                ) {
+                    return interaction.reply({
+                        content:
+                            '❌ التوجه يجب أن يكون ايدي روم صحيح أو لينك روم صحيح.',
+                        ephemeral: true
+                    });
+                }
+
+                let destinationText =
+                    destination;
+
+                if (
+                    validChannelId
+                ) {
+                    destinationText =
+                        `<#${destination}>`;
+                }
+
+                const summonEmbed =
+                    new EmbedBuilder()
+                        .setColor('#D4AC0D')
+                        .setTitle(
+                            '📩 إشعار استدعاء'
+                        )
+                        .addFields(
+                            {
+                                name:
+                                    '🌐 السيرفر',
+                                value:
+                                    `**${interaction.guild.name}**`
+                            },
+                            {
+                                name:
+                                    '📍 التوجه',
+                                value:
+                                    destinationText
+                            },
+                            {
+                                name:
+                                    '📌 السبب',
+                                value:
+                                    reason
+                            }
+                        )
+                        .setTimestamp();
+
+                await interaction.reply({
+                    content:
+                        '📩 جاري إرسال إشعار الاستدعاء لجميع أعضاء السيرفر.',
+                    ephemeral: true
+                });
+
+                const members =
+                    await interaction.guild.members.fetch();
+
+                for (
+                    const member
+                    of members.values()
+                ) {
+                    if (
+                        member.user.bot
+                    ) continue;
+
+                    await member.send({
+                        embeds: [
+                            summonEmbed
+                        ]
+                    }).catch(
+                        () => {}
+                    );
                 }
 
                 return;
             }
 
-            if (
-                interaction.isButton()
-            ) {
-                const guild =
-                    interaction.guild;
+            /*
+            =========================================================
+            VERIFY TRANSFER
+            =========================================================
+            */
 
-                if (!guild) {
+            if (
+                interaction.isButton() &&
+                interaction.customId.startsWith(
+                    'verify_transfer_'
+                )
+            ) {
+                const parts =
+                    interaction.customId
+                        .split('_');
+
+                const senderId =
+                    parts[2];
+
+                const targetId =
+                    parts[3];
+
+                const amount =
+                    parseInt(
+                        parts[4]
+                    );
+
+                if (
+                    interaction.user.id !==
+                    senderId
+                ) {
                     return interaction.reply({
                         content:
-                            '❌ هذا الزر يعمل داخل السيرفر فقط.',
+                            '❌ هذا الزر ليس مخصصاً لك.',
                         ephemeral: true
                     });
                 }
 
-                if (
-                    interaction.customId ===
-                    'economy_balance'
-                ) {
-                    const db =
-                        loadDB();
-
-                    const balance =
-                        getMemberBalance(
-                            db,
-                            guild.id,
-                            interaction.user.id
-                        );
-
-                    const currencyName =
-                        getCurrencyName(
-                            guild.id
-                        );
-
-                    return interaction.reply({
-                        embeds: [
-                            new EmbedBuilder()
-                                .setColor(
-                                    '#D4AC0D'
-                                )
-                                .setTitle(
-                                    '💰 رصيدك'
-                                )
-                                .setDescription(
-                                    `رصيدك الحالي: **${formatAmount(balance)} ${currencyName}**`
-                                )
-                        ],
-                        ephemeral: true
-                    });
-                }
-
-                if (
-                    interaction.customId ===
-                    'economy_daily'
-                ) {
-                    const db =
-                        loadDB();
-
-                    const user =
-                        ensureGuildUser(
-                            db,
-                            guild.id,
-                            interaction.user.id
-                        );
-
-                    const now =
-                        Date.now();
-
-                    const cooldown =
-                        24 *
-                        60 *
-                        60 *
-                        1000;
-
-                    if (
-                        now -
-                        user.lastDaily <
-                        cooldown
-                    ) {
-                        const remaining =
-                            cooldown -
-                            (
-                                now -
-                                user.lastDaily
-                            );
-
-                        const hours =
-                            Math.ceil(
-                                remaining /
-                                (
-                                    60 *
-                                    60 *
-                                    1000
-                                )
-                            );
-
-                        return interaction.reply({
-                            content:
-                                `⏳ يمكنك استلام اليومي بعد **${hours} ساعة**.`,
-                            ephemeral: true
-                        });
-                    }
-
-                    const reward =
-                        Math.floor(
-                            Math.random() *
-                            5000
-                        ) + 1000;
-
-                    user.balance +=
-                        reward;
-
-                    user.lastDaily =
-                        now;
-
-                    saveDB(db);
-
-                    const currencyName =
-                        getCurrencyName(
-                            guild.id
-                        );
-
-                    return interaction.reply({
-                        embeds: [
-                            new EmbedBuilder()
-                                .setColor(
-                                    '#D4AC0D'
-                                )
-                                .setTitle(
-                                    '🎁 المكافأة اليومية'
-                                )
-                                .setDescription(
-                                    `تم إضافة **${formatAmount(reward)} ${currencyName}** إلى رصيدك.`
-                                )
-                        ],
-                        ephemeral: true
-                    });
-                }
-
-                if (
-                    interaction.customId ===
-                    'economy_top'
-                ) {
-                    const db =
-                        loadDB();
-
-                    return interaction.reply({
-                        embeds: [
-                            createTopEmbed(
-                                guild,
-                                db
-                            )
-                        ],
-                        ephemeral: true
-                    });
-                }
-
-                if (
-                    interaction.customId ===
-                    'economy_transfer'
-                ) {
-                    return interaction.showModal(
-                        buildTransferModal()
-                    );
-                }
-
-                if (
-                    interaction.customId.startsWith(
-                        'cancel_transfer_'
-                    )
-                ) {
-                    const senderId =
-                        interaction.customId
-                            .replace(
-                                'cancel_transfer_',
-                                ''
-                            );
-
-                    if (
-                        interaction.user.id !==
+                const transfer =
+                    pendingTransfers.get(
                         senderId
-                    ) {
-                        return interaction.reply({
-                            content:
-                                '❌ هذا الزر ليس مخصصاً لك.',
-                            ephemeral: true
-                        });
-                    }
+                    );
 
+                if (!transfer) {
+                    return interaction.reply({
+                        content:
+                            '❌ عملية التحويل انتهت أو غير موجودة.',
+                        ephemeral: true
+                    });
+                }
+
+                const db =
+                    loadDB();
+
+                ensureUser(
+                    db,
+                    senderId
+                );
+
+                ensureUser(
+                    db,
+                    targetId
+                );
+
+                if (
+                    db[senderId]
+                        .balance <
+                    amount
+                ) {
                     pendingTransfers.delete(
                         senderId
                     );
 
-                    return interaction.update({
-                        content:
-                            '❌ تم إلغاء عملية التحويل.',
-                        embeds: [],
-                        components: []
-                    });
-                }
-
-                if (
-                    interaction.customId.startsWith(
-                        'verify_transfer_'
-                    )
-                ) {
-                    const parts =
-                        interaction.customId
-                            .split('_');
-
-                    const senderId =
-                        parts[2];
-
-                    const targetId =
-                        parts[3];
-
-                    const amount =
-                        parseInt(
-                            parts[4]
-                        );
-
-                    if (
-                        interaction.user.id !==
-                        senderId
-                    ) {
-                        return interaction.reply({
-                            content:
-                                '❌ هذا الزر ليس مخصصاً لك.',
-                            ephemeral: true
-                        });
-                    }
-
-                    const transfer =
-                        pendingTransfers.get(
-                            senderId
-                        );
-
-                    if (!transfer) {
-                        return interaction.reply({
-                            content:
-                                '❌ عملية التحويل انتهت أو غير موجودة.',
-                            ephemeral: true
-                        });
-                    }
-
-                    if (
-                        transfer.guildId !==
-                        guild.id
-                    ) {
-                        return interaction.reply({
-                            content:
-                                '❌ عملية التحويل مرتبطة بسيرفر آخر.',
-                            ephemeral: true
-                        });
-                    }
-
-                    const db =
-                        loadDB();
-
-                    const sender =
-                        ensureGuildUser(
-                            db,
-                            guild.id,
-                            senderId
-                        );
-
-                    ensureGuildUser(
-                        db,
-                        guild.id,
-                        targetId
-                    );
-
-                    if (
-                        sender.balance <
-                        amount
-                    ) {
-                        pendingTransfers.delete(
-                            senderId
-                        );
-
-                        return interaction.reply({
-                            content:
-                                '❌ لم يعد لديك رصيد كافٍ لإتمام العملية.',
-                            ephemeral: true
-                        });
-                    }
-
-                    let code = '';
-
-                    for (
-                        let i = 0;
-                        i < 6;
-                        i++
-                    ) {
-                        code +=
-                            Math.floor(
-                                Math.random() *
-                                10
-                            );
-                    }
-
-                    transfer.code =
-                        code;
-
-                    pendingTransfers.set(
-                        senderId,
-                        transfer
-                    );
-
                     return interaction.reply({
                         content:
-                            `🔐 رمز التحقق الخاص بالتحويل:\n\n**${code}**\n\nقم بإرسال الرمز في روم العملات لتأكيد العملية.`,
+                            '❌ لم يعد لديك رصيد كافٍ لإتمام العملية.',
                         ephemeral: true
                     });
                 }
 
-                if (
-                    interaction.customId.startsWith(
-                        'mass_summon_'
-                    )
+                let code = '';
+
+                for (
+                    let i = 0;
+                    i < 6;
+                    i++
                 ) {
-                    if (
-                        !getMassSummonMember(
-                            interaction.member
-                        )
-                    ) {
-                        return interaction.reply({
-                            content:
-                                '❌ لا تملك صلاحية استخدام الاستدعاء.',
-                            ephemeral: true
-                        });
-                    }
-
-                    return interaction.showModal(
-                        buildMassSummonModal(
-                            guild.id
-                        )
-                    );
-                }
-            }
-
-            if (
-                interaction.isModalSubmit()
-            ) {
-                const guild =
-                    interaction.guild;
-
-                if (!guild) {
-                    return interaction.reply({
-                        content:
-                            '❌ هذا النموذج يعمل داخل السيرفر فقط.',
-                        ephemeral: true
-                    });
+                    code +=
+                        Math.floor(
+                            Math.random() *
+                            10
+                        );
                 }
 
-                if (
-                    interaction.customId ===
-                    'transfer_modal'
-                ) {
-                    const targetText =
-                        interaction.fields
-                            .getTextInputValue(
-                                'transfer_user'
-                            )
-                            .trim();
+                transfer.code =
+                    code;
 
-                    const amountText =
-                        interaction.fields
-                            .getTextInputValue(
-                                'transfer_amount'
-                            )
-                            .trim();
+                pendingTransfers.set(
+                    senderId,
+                    transfer
+                );
 
-                    const targetId =
-                        targetText.replace(
-                            /[<@!>]/g,
-                            ''
-                        );
-
-                    if (
-                        !/^\d{17,20}$/.test(
-                            targetId
-                        )
-                    ) {
-                        return interaction.reply({
-                            content:
-                                '❌ ايدي العضو غير صحيح.',
-                            ephemeral: true
-                        });
-                    }
-
-                    if (
-                        targetId ===
-                        interaction.user.id
-                    ) {
-                        return interaction.reply({
-                            content:
-                                '❌ لا يمكنك التحويل لنفسك.',
-                            ephemeral: true
-                        });
-                    }
-
-                    const amount =
-                        parseAmount(
-                            amountText
-                        );
-
-                    if (
-                        !Number.isFinite(
-                            amount
-                        ) ||
-                        amount <= 0
-                    ) {
-                        return interaction.reply({
-                            content:
-                                '❌ المبلغ غير صحيح.',
-                            ephemeral: true
-                        });
-                    }
-
-                    const db =
-                        loadDB();
-
-                    const balance =
-                        getMemberBalance(
-                            db,
-                            guild.id,
-                            interaction.user.id
-                        );
-
-                    if (
-                        balance <
-                        amount
-                    ) {
-                        return interaction.reply({
-                            content:
-                                '❌ رصيدك لا يكفي.',
-                            ephemeral: true
-                        });
-                    }
-
-                    pendingTransfers.set(
-                        interaction.user.id,
-                        {
-                            guildId:
-                                guild.id,
-                            targetId,
-                            amount,
-                            code: null,
-                            createdAt:
-                                Date.now()
-                        }
-                    );
-
-                    const currencyName =
-                        getCurrencyName(
-                            guild.id
-                        );
-
-                    const row =
-                        new ActionRowBuilder()
-                            .addComponents(
-                                makeButton(
-                                    `verify_transfer_${interaction.user.id}_${targetId}_${amount}`,
-                                    'تأكيد التحويل',
-                                    ButtonStyle.Success
-                                ),
-                                makeButton(
-                                    `cancel_transfer_${interaction.user.id}`,
-                                    'إلغاء',
-                                    ButtonStyle.Danger
-                                )
-                            );
-
-                    return interaction.reply({
-                        embeds: [
-                            new EmbedBuilder()
-                                .setColor(
-                                    '#D4AC0D'
-                                )
-                                .setTitle(
-                                    '💸 تأكيد التحويل'
-                                )
-                                .setDescription(
-                                    `هل تريد تحويل **${formatAmount(amount)} ${currencyName}** إلى <@${targetId}>؟`
-                                )
-                        ],
-                        components: [
-                            row
-                        ],
-                        ephemeral: true
-                    });
-                }
-
-                if (
-                    interaction.customId.startsWith(
-                        'bot_name_modal_'
-                    )
-                ) {
-                    if (
-                        !isAdmin(
-                            interaction.member
-                        )
-                    ) {
-                        return interaction.reply({
-                            content:
-                                '❌ هذا النموذج للإدارة فقط.',
-                            ephemeral: true
-                        });
-                    }
-
-                    const name =
-                        interaction.fields
-                            .getTextInputValue(
-                                'bot_name'
-                            )
-                            .trim();
-
-                    const db =
-                        loadDB();
-
-                    const config =
-                        ensureGuildConfig(
-                            db,
-                            guild.id
-                        );
-
-                    config.customBotName =
-                        name;
-
-                    saveDB(db);
-
-                    return interaction.reply({
-                        content:
-                            '✅ تم حفظ اسم البوت لهذا السيرفر.',
-                        ephemeral: true
-                    });
-                }
-
-                if (
-                    interaction.customId.startsWith(
-                        'mass_summon_modal_'
-                    )
-                ) {
-                    const destination =
-                        interaction.fields
-                            .getTextInputValue(
-                                'mass_summon_destination'
-                            )
-                            .trim();
-
-                    const reason =
-                        interaction.fields
-                            .getTextInputValue(
-                                'mass_summon_reason'
-                            )
-                            .trim();
-
-                    const validChannelId =
-                        /^\d{17,20}$/.test(
-                            destination
-                        );
-
-                    const validChannelLink =
-                        /^https?:\/\/(?:www\.)?discord(?:app)?\.com\/channels\/\d+\/\d+(?:\/\d+)?$/i.test(
-                            destination
-                        );
-
-                    if (
-                        !validChannelId &&
-                        !validChannelLink
-                    ) {
-                        return interaction.reply({
-                            content:
-                                '❌ التوجه يجب أن يكون ايدي روم صحيح أو لينك روم صحيح.',
-                            ephemeral: true
-                        });
-                    }
-
-                    let destinationText =
-                        destination;
-
-                    if (
-                        validChannelId
-                    ) {
-                        destinationText =
-                            `<#${destination}>`;
-                    }
-
-                    const summonEmbed =
-                        new EmbedBuilder()
-                            .setColor(
-                                '#D4AC0D'
-                            )
-                            .setTitle(
-                                '📩 إشعار استدعاء'
-                            )
-                            .addFields(
-                                {
-                                    name:
-                                        '🌐 السيرفر',
-                                    value:
-                                        `**${guild.name}**`
-                                },
-                                {
-                                    name:
-                                        '📍 التوجه',
-                                    value:
-                                        destinationText
-                                },
-                                {
-                                    name:
-                                        '📌 السبب',
-                                    value:
-                                        reason
-                                }
-                            )
-                            .setTimestamp();
-
-                    await interaction.reply({
-                        content:
-                            '📩 جاري إرسال إشعار الاستدعاء لجميع أعضاء السيرفر.',
-                        ephemeral: true
-                    });
-
-                    const members =
-                        await guild.members.fetch();
-
-                    for (
-                        const member
-                        of members.values()
-                    ) {
-                        if (
-                            member.user.bot
-                        ) continue;
-
-                        await member.send({
-                            embeds: [
-                                summonEmbed
-                            ]
-                        }).catch(
-                            () => {}
-                        );
-                    }
-
-                    return;
-                }
-
-                if (
-                    interaction.customId ===
-                    'give_modal'
-                ) {
-                    if (
-                        !isAdmin(
-                            interaction.member
-                        )
-                    ) {
-                        return interaction.reply({
-                            content:
-                                '❌ هذا النموذج للإدارة فقط.',
-                            ephemeral: true
-                        });
-                    }
-
-                    const targetText =
-                        interaction.fields
-                            .getTextInputValue(
-                                'give_user'
-                            )
-                            .trim();
-
-                    const amountText =
-                        interaction.fields
-                            .getTextInputValue(
-                                'give_amount'
-                            )
-                            .trim();
-
-                    const targetId =
-                        targetText.replace(
-                            /[<@!>]/g,
-                            ''
-                        );
-
-                    if (
-                        !/^\d{17,20}$/.test(
-                            targetId
-                        )
-                    ) {
-                        return interaction.reply({
-                            content:
-                                '❌ ايدي العضو غير صحيح.',
-                            ephemeral: true
-                        });
-                    }
-
-                    const amount =
-                        parseAmount(
-                            amountText
-                        );
-
-                    if (
-                        !Number.isFinite(
-                            amount
-                        ) ||
-                        amount <= 0
-                    ) {
-                        return interaction.reply({
-                            content:
-                                '❌ المبلغ غير صحيح.',
-                            ephemeral: true
-                        });
-                    }
-
-                    const db =
-                        loadDB();
-
-                    addMemberBalance(
-                        db,
-                        guild.id,
-                        targetId,
-                        amount
-                    );
-
-                    saveDB(db);
-
-                    const currencyName =
-                        getCurrencyName(
-                            guild.id
-                        );
-
-                    return interaction.reply({
-                        content:
-                            `✅ تمت إضافة **${formatAmount(amount)} ${currencyName}** إلى <@${targetId}>.`,
-                        ephemeral: true
-                    });
-                }
-
-                if (
-                    interaction.customId ===
-                    'withdraw_modal'
-                ) {
-                    if (
-                        !isAdmin(
-                            interaction.member
-                        )
-                    ) {
-                        return interaction.reply({
-                            content:
-                                '❌ هذا النموذج للإدارة فقط.',
-                            ephemeral: true
-                        });
-                    }
-
-                    const targetText =
-                        interaction.fields
-                            .getTextInputValue(
-                                'withdraw_user'
-                            )
-                            .trim();
-
-                    const amountText =
-                        interaction.fields
-                            .getTextInputValue(
-                                'withdraw_amount'
-                            )
-                            .trim();
-
-                    const targetId =
-                        targetText.replace(
-                            /[<@!>]/g,
-                            ''
-                        );
-
-                    if (
-                        !/^\d{17,20}$/.test(
-                            targetId
-                        )
-                    ) {
-                        return interaction.reply({
-                            content:
-                                '❌ ايدي العضو غير صحيح.',
-                            ephemeral: true
-                        });
-                    }
-
-                    const db =
-                        loadDB();
-
-                    let amount;
-
-                    if (
-                        amountText ===
-                        'كامل' ||
-                        amountText.toLowerCase() ===
-                        'all'
-                    ) {
-                        amount =
-                            getMemberBalance(
-                                db,
-                                guild.id,
-                                targetId
-                            );
-                    } else {
-                        amount =
-                            parseAmount(
-                                amountText
-                            );
-                    }
-
-                    if (
-                        !Number.isFinite(
-                            amount
-                        ) ||
-                        amount <= 0
-                    ) {
-                        return interaction.reply({
-                            content:
-                                '❌ المبلغ غير صحيح.',
-                            ephemeral: true
-                        });
-                    }
-
-                    const current =
-                        getMemberBalance(
-                            db,
-                            guild.id,
-                            targetId
-                        );
-
-                    if (
-                        current <
-                        amount
-                    ) {
-                        return interaction.reply({
-                            content:
-                                '❌ رصيد العضو لا يكفي.',
-                            ephemeral: true
-                        });
-                    }
-
-                    removeMemberBalance(
-                        db,
-                        guild.id,
-                        targetId,
-                        amount
-                    );
-
-                    saveDB(db);
-
-                    const currencyName =
-                        getCurrencyName(
-                            guild.id
-                        );
-
-                    return interaction.reply({
-                        content:
-                            `✅ تم سحب **${formatAmount(amount)} ${currencyName}** من <@${targetId}>.`,
-                        ephemeral: true
-                    });
-                }
+                return interaction.reply({
+                    content:
+                        `🔐 رمز التحقق الخاص بالتحويل:\n\n**${code}**\n\nقم بإرسال الرمز في روم العملات لتأكيد العملية.`,
+                    ephemeral: true
+                });
             }
 
         } catch (error) {
