@@ -1,4 +1,4 @@
-import {
+const {
     Client,
     GatewayIntentBits,
     EmbedBuilder,
@@ -11,7 +11,10 @@ import {
     PermissionFlagsBits,
     StringSelectMenuBuilder,
     SlashCommandBuilder
-} from 'discord.js';
+} = require('discord.js');
+
+const fs = require('fs');
+require('dotenv/config');
 
 import fs from 'fs';
 import 'dotenv/config';
