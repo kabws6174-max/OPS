@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "Discord Bot Premium",
   "main": "Premium.js",
+  "type": "module",
   "scripts": {
     "start": "node Premium.js"
   },
