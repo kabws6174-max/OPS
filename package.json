@@ -3,11 +3,10 @@
   "version": "1.0.0",
   "description": "Discord Bot Premium",
   "main": "Premium.js",
-  "type": "module",
   "scripts": {
     "start": "node Premium.js"
   },
   "dependencies": {
-    "discord.js": "^14.14.0"
+    "discord.js": "^13.16.0"
   }
 }
