@@ -2242,16 +2242,18 @@ client.on(
                 }
 
                 if (
-                    !interaction.memberPermissions?.has(
-                        PermissionFlagsBits.Administrator
-                    )
-                ) {
-                    return interaction.reply({
-                        content:
-                            '❌ هذا الأمر مخصص للإداريين فقط.',
-                        ephemeral: true
-                    });
-                }
+    !(
+        interaction.memberPermissions &&
+        interaction.memberPermissions.has(
+            PermissionFlagsBits.Administrator
+        )
+    )
+) {
+    return interaction.reply({
+        content: '❌ هذا الأمر مخصص للإداريين فقط.',
+        ephemeral: true
+    });
+}
 
                 const name =
                     interaction.fields
