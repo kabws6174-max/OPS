@@ -14,10 +14,7 @@ const {
 } = require('discord.js');
 
 const fs = require('fs');
-require('dotenv/config');
-
-import fs from 'fs';
-import 'dotenv/config';
+require('dotenv').config();
 
 const TOKEN = String(
     process.env.DISCORD_TOKEN || 'MTU1MzA5OTU2NjIzOTMxODA4Ng.GyGPmy.y_edAasusm0kEaEoJXRj6fQ-nOr8BvPok1HeHM'
