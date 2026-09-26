@@ -16,7 +16,7 @@ const {
 const fs = require('fs');
 require('dotenv').config();
 
-const TOKEN = 'PUT_YOUR_BOT_TOKEN_HERE';
+const TOKEN = 'MTU1MzA5OTU2NjIzOTMxODA4Ng.GyGPmy.y_edAasusm0kEaEoJXRj6fQ-nOr8BvPok1HeHM';
 
 if (!TOKEN || TOKEN === 'PUT_YOUR_BOT_TOKEN_HERE') {
     console.error('❌ ضع توكن البوت داخل المتغير TOKEN في السكربت.');
