@@ -16,10 +16,12 @@ const {
 const fs = require('fs');
 require('dotenv').config();
 
-const TOKEN = String(
-    process.env.DISCORD_TOKEN || 'MTU1MzA5OTU2NjIzOTMxODA4Ng.GyGPmy.y_edAasusm0kEaEoJXRj6fQ-nOr8BvPok1HeHM'
-).trim();
+const TOKEN = String(process.env.DISCORD_TOKEN || '').trim();
 
+if (!TOKEN) {
+    console.error('❌ DISCORD_TOKEN غير موجود في Railway Variables.');
+    process.exit(1);
+}
 const REQUEST_CHANNEL_ID = '1545187326093693038';
 const PREMIUM_ROLE_ID = '1544858160982917261';
 const MASS_SUMMON_ROLE_ID = '1546263383526088805';
