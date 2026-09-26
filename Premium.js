@@ -16,10 +16,10 @@ const {
 const fs = require('fs');
 require('dotenv').config();
 
-const TOKEN = String(process.env.DISCORD_TOKEN || '').trim();
+const TOKEN = 'PUT_YOUR_BOT_TOKEN_HERE';
 
-if (!TOKEN) {
-    console.error('❌ DISCORD_TOKEN غير موجود في Railway Variables.');
+if (!TOKEN || TOKEN === 'PUT_YOUR_BOT_TOKEN_HERE') {
+    console.error('❌ ضع توكن البوت داخل المتغير TOKEN في السكربت.');
     process.exit(1);
 }
 const REQUEST_CHANNEL_ID = '1545187326093693038';
@@ -2481,9 +2481,23 @@ client.on(
                                 client.user.id
                             );
 
-                    await me.edit({
-                        nick: name
-                    });
+                    const botPermissions = me.permissions;
+
+                    if (
+                        !botPermissions.has(
+                            PermissionFlagsBits.ChangeNickname
+                        ) &&
+                        !botPermissions.has(
+                            PermissionFlagsBits.Administrator
+                        )
+                    ) {
+                        return interaction.editReply({
+                            content:
+                                '❌ البوت لا يملك صلاحية **Change Nickname**. أعطِ رتبة البوت صلاحية تغيير الاسم ثم جرّب مرة أخرى.'
+                        });
+                    }
+
+                    await me.setNickname(name);
 
                     config.profile.name =
                         name;
@@ -2500,12 +2514,18 @@ client.on(
                         error
                     );
 
+                    const discordError =
+                        error?.code === 50013
+                            ? '\n❌ Discord رفض العملية بسبب الصلاحيات. تأكد أن رتبة البوت لديها **Change Nickname** أو **Administrator**.'
+                            : '';
+
                     return interaction.editReply({
                         content:
-                            '❌ تعذر تغيير اسم البوت في هذا السيرفر. تأكد من أن للبوت صلاحية تغيير الاسم وأن رتبة البوت تسمح بذلك.'
+                            `❌ تعذر تغيير اسم البوت في هذا السيرفر.${discordError}`
                     });
                 }
             }
+
 
             /*
             =========================================================
