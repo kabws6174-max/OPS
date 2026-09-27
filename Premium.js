@@ -33,6 +33,7 @@ const DB_TEMP_FILE = path.join(__dirname, 'economy.tmp.json');
 
 const DEFAULT_CURRENCY_NAME = '𝐎𝐏𝐬';
 const MAX_ECONOMY_CHANNELS = 3;
+const DB_VERSION = 2;
 
 const client = new Client({
     intents: [
@@ -76,6 +77,18 @@ function loadDB() {
             throw new Error('Invalid database format');
         }
 
+        if (typeof data.dbVersion !== 'number') {
+            data.dbVersion = DB_VERSION;
+        }
+
+        if (!data.guildSettings || typeof data.guildSettings !== 'object') {
+            data.guildSettings = {};
+        }
+
+        if (!data.guildEconomy || typeof data.guildEconomy !== 'object') {
+            data.guildEconomy = {};
+        }
+
         return data;
     } catch (error) {
         console.error(
@@ -96,6 +109,18 @@ function loadDB() {
                     typeof backupData === 'object' &&
                     !Array.isArray(backupData)
                 ) {
+                    if (typeof backupData.dbVersion !== 'number') {
+                        backupData.dbVersion = DB_VERSION;
+                    }
+
+                    if (!backupData.guildSettings || typeof backupData.guildSettings !== 'object') {
+                        backupData.guildSettings = {};
+                    }
+
+                    if (!backupData.guildEconomy || typeof backupData.guildEconomy !== 'object') {
+                        backupData.guildEconomy = {};
+                    }
+
                     fs.copyFileSync(
                         DB_BACKUP_FILE,
                         DB_FILE
@@ -125,6 +150,16 @@ function loadDB() {
 
 function saveDB(data) {
     try {
+        data.dbVersion = DB_VERSION;
+
+        if (!data.guildSettings || typeof data.guildSettings !== 'object') {
+            data.guildSettings = {};
+        }
+
+        if (!data.guildEconomy || typeof data.guildEconomy !== 'object') {
+            data.guildEconomy = {};
+        }
+
         const serialized = JSON.stringify(
             data,
             null,
@@ -195,15 +230,23 @@ function saveDB(data) {
 }
 
 function ensureGuildConfig(db, guildId) {
-    if (!db.guildSettings) {
+    if (!db.guildSettings || typeof db.guildSettings !== 'object') {
         db.guildSettings = {};
     }
 
-    if (!db.guildSettings[guildId]) {
+    if (!db.guildEconomy || typeof db.guildEconomy !== 'object') {
+        db.guildEconomy = {};
+    }
+
+    if (!db.guildSettings[guildId] || typeof db.guildSettings[guildId] !== 'object') {
         db.guildSettings[guildId] = {
             currencyName: DEFAULT_CURRENCY_NAME,
             economyChannels: []
         };
+    }
+
+    if (!db.guildEconomy[guildId] || typeof db.guildEconomy[guildId] !== 'object') {
+        db.guildEconomy[guildId] = {};
     }
 
     const config = db.guildSettings[guildId];
@@ -219,9 +262,13 @@ function ensureGuildConfig(db, guildId) {
         config.economyChannels = [];
     }
 
-    config.economyChannels = config.economyChannels
-        .filter(id => /^\d{17,20}$/.test(String(id)))
-        .slice(0, MAX_ECONOMY_CHANNELS);
+    config.economyChannels = [
+        ...new Set(
+            config.economyChannels
+                .map(id => String(id))
+                .filter(id => /^\d{17,20}$/.test(id))
+        )
+    ].slice(0, MAX_ECONOMY_CHANNELS);
 
     return config;
 }
@@ -235,23 +282,47 @@ function getCurrencyName(guildId) {
     return getGuildConfig(guildId).currencyName;
 }
 
-function ensureUser(db, userId) {
-    if (!db[userId]) {
-        db[userId] = {
+function ensureGuildEconomy(db, guildId) {
+    if (!db.guildEconomy) {
+        db.guildEconomy = {};
+    }
+
+    if (!db.guildEconomy[guildId]) {
+        db.guildEconomy[guildId] = {};
+    }
+
+    return db.guildEconomy[guildId];
+}
+
+function ensureUser(db, guildId, userId) {
+    const economy = ensureGuildEconomy(db, guildId);
+
+    if (!economy[userId]) {
+        economy[userId] = {
             balance: 0,
             lastDaily: 0
         };
     }
 
-    if (typeof db[userId].balance !== 'number') {
-        db[userId].balance =
-            Number(db[userId].balance) || 0;
+    if (typeof economy[userId].balance !== 'number') {
+        economy[userId].balance =
+            Number(economy[userId].balance) || 0;
     }
 
-    if (typeof db[userId].lastDaily !== 'number') {
-        db[userId].lastDaily =
-            Number(db[userId].lastDaily) || 0;
+    if (typeof economy[userId].lastDaily !== 'number') {
+        economy[userId].lastDaily =
+            Number(economy[userId].lastDaily) || 0;
     }
+
+    return economy[userId];
+}
+
+function getGuildEconomy(db, guildId) {
+    return ensureGuildEconomy(db, guildId);
+}
+
+function getUser(db, guildId, userId) {
+    return ensureUser(db, guildId, userId);
 }
 
 function parseAmount(value) {
@@ -460,7 +531,17 @@ async function registerSlashCommands() {
 client.once('ready', async () => {
     console.log('======================================');
     console.log(`✅ البوت اشتغل: ${client.user.tag}`);
-    console.log('💰 نظام العملات أصبح يدعم إعدادات مستقلة لكل سيرفر.');
+
+    const startupDB = loadDB();
+
+    for (const guild of client.guilds.cache.values()) {
+        ensureGuildConfig(startupDB, guild.id);
+    }
+
+    saveDB(startupDB);
+
+    console.log('💾 تم تحميل وحفظ قاعدة البيانات الخاصة بكل السيرفرات.');
+    console.log('💰 إعدادات ورومات وأرصدة العملة محفوظة ومنفصلة لكل سيرفر.');
     console.log('👤 اسم وصورة وبنر البوت أصبحت مستقلة لكل سيرفر.');
     await registerSlashCommands();
     console.log('======================================');
@@ -778,19 +859,23 @@ client.on('messageCreate', async message => {
         const userId =
             message.author.id;
 
+        const transferKey =
+            `${message.guild.id}:${userId}`;
+
         ensureUser(
             db,
+            message.guild.id,
             userId
         );
 
         if (
             pendingTransfers.has(
-                userId
+                transferKey
             )
         ) {
             const transferData =
                 pendingTransfers.get(
-                    userId
+                    transferKey
                 );
 
             if (
@@ -799,7 +884,7 @@ client.on('messageCreate', async message => {
                     transferData.code
             ) {
                 pendingTransfers.delete(
-                    userId
+                    transferKey
                 );
 
                 await message.delete()
@@ -816,16 +901,18 @@ client.on('messageCreate', async message => {
 
                 ensureUser(
                     transferDB,
+                    transferData.guildId,
                     userId
                 );
 
                 ensureUser(
                     transferDB,
+                    transferData.guildId,
                     transferData.targetId
                 );
 
                 if (
-                    transferDB[userId]
+                    getUser(transferDB, transferData.guildId, userId)
                         .balance <
                     transferData.amount
                 ) {
@@ -840,13 +927,15 @@ client.on('messageCreate', async message => {
                     });
                 }
 
-                transferDB[userId]
+                getUser(transferDB, transferData.guildId, userId)
                     .balance -=
                     transferData.amount;
 
-                transferDB[
+                getUser(
+                    transferDB,
+                    transferData.guildId,
                     transferData.targetId
-                ].balance +=
+                ).balance +=
                     transferData.amount;
 
                 saveDB(
@@ -961,14 +1050,14 @@ client.on('messageCreate', async message => {
 
             if (
                 now -
-                    db[userId].lastDaily <
+                    getUser(db, message.guild.id, userId).lastDaily <
                 cooldown
             ) {
                 const remaining =
                     cooldown -
                     (
                         now -
-                        db[userId].lastDaily
+                        getUser(db, message.guild.id, userId).lastDaily
                     );
 
                 const hours =
@@ -1024,10 +1113,10 @@ client.on('messageCreate', async message => {
                         301
                     ) + 1700;
 
-            db[userId].balance +=
+            getUser(db, message.guild.id, userId).balance +=
                 randomAmount;
 
-            db[userId].lastDaily =
+            getUser(db, message.guild.id, userId).lastDaily =
                 now;
 
             saveDB(db);
@@ -1080,12 +1169,13 @@ client.on('messageCreate', async message => {
 
             ensureUser(
                 db,
+                message.guild.id,
                 targetMember.id
             );
 
             const balance =
                 Number(
-                    db[targetMember.id]
+                    getUser(db, message.guild.id, targetMember.id)
                         .balance
                 ) || 0;
 
@@ -1164,7 +1254,7 @@ client.on('messageCreate', async message => {
 
             const currentBalance =
                 Number(
-                    db[userId].balance
+                    getUser(db, message.guild.id, userId).balance
                 ) || 0;
 
             if (
@@ -1240,8 +1330,10 @@ client.on('messageCreate', async message => {
                 });
 
             pendingTransfers.set(
-                userId,
+                transferKey,
                 {
+                    guildId:
+                        message.guild.id,
                     targetId:
                         targetMember.id,
                     amount,
@@ -1293,7 +1385,12 @@ client.on('messageCreate', async message => {
             }
 
             const sortedUsers =
-                Object.entries(db)
+                Object.entries(
+                    getGuildEconomy(
+                        db,
+                        message.guild.id
+                    )
+                )
                     .filter(
                         ([, data]) =>
                             Number(
@@ -1365,11 +1462,12 @@ client.on('messageCreate', async message => {
 
             ensureUser(
                 db,
+                message.guild.id,
                 targetId
             );
 
             const userData =
-                db[targetId];
+                getUser(db, message.guild.id, targetId);
 
             let lastTimeText =
                 'لم يستلم أبداً';
@@ -1524,10 +1622,11 @@ client.on('messageCreate', async message => {
 
             ensureUser(
                 db,
+                message.guild.id,
                 targetMember.id
             );
 
-            db[targetMember.id]
+            getUser(db, message.guild.id, targetMember.id)
                 .balance +=
                 amount;
 
@@ -1597,12 +1696,13 @@ client.on('messageCreate', async message => {
 
             ensureUser(
                 db,
+                message.guild.id,
                 targetMember.id
             );
 
             const balance =
                 Number(
-                    db[targetMember.id]
+                    getUser(db, message.guild.id, targetMember.id)
                         .balance
                 ) || 0;
 
@@ -1647,7 +1747,7 @@ client.on('messageCreate', async message => {
                 amount = balance;
             }
 
-            db[targetMember.id]
+            getUser(db, message.guild.id, targetMember.id)
                 .balance =
                 Math.max(
                     0,
@@ -2204,10 +2304,11 @@ client.on(
 
                     ensureUser(
                         db,
+                        interaction.guild.id,
                         targetUser.id
                     );
 
-                    db[targetUser.id]
+                    getUser(db, interaction.guild.id, targetUser.id)
                         .balance +=
                         amount;
 
@@ -2262,12 +2363,13 @@ client.on(
 
                     ensureUser(
                         db,
+                        interaction.guild.id,
                         targetUser.id
                     );
 
                     const balance =
                         Number(
-                            db[targetUser.id]
+                            getUser(db, interaction.guild.id, targetUser.id)
                                 .balance
                         ) || 0;
 
@@ -2321,7 +2423,7 @@ client.on(
                         });
                     }
 
-                    db[targetUser.id]
+                    getUser(db, interaction.guild.id, targetUser.id)
                         .balance =
                         Math.max(
                             0,
@@ -3199,10 +3301,11 @@ client.on(
 
                 ensureUser(
                     db,
+                    reward.guildId,
                     reward.targetId
                 );
 
-                db[reward.targetId]
+                getUser(db, reward.guildId, reward.targetId)
                     .balance +=
                     reward.amount;
 
@@ -3227,9 +3330,11 @@ client.on(
                             `تمت إضافة **${formatAmount(
                                 reward.amount
                             )} ${currencyName}** إلى رصيدك بنجاح.\n\n**السبب :** ${reward.reason}\n**رصيدك الحالي :** ${formatAmount(
-                                db[
+                                getUser(
+                                    db,
+                                    reward.guildId,
                                     reward.targetId
-                                ].balance
+                                ).balance
                             )} ${currencyName}`
                         )
                         .setTimestamp();
@@ -3795,9 +3900,12 @@ client.on(
                     });
                 }
 
+                const transferKey =
+                    `${interaction.guild.id}:${senderId}`;
+
                 const transfer =
                     pendingTransfers.get(
-                        senderId
+                        transferKey
                     );
 
                 if (!transfer) {
@@ -3813,21 +3921,23 @@ client.on(
 
                 ensureUser(
                     db,
+                    interaction.guild.id,
                     senderId
                 );
 
                 ensureUser(
                     db,
+                    interaction.guild.id,
                     targetId
                 );
 
                 if (
-                    db[senderId]
+                    getUser(db, interaction.guild.id, senderId)
                         .balance <
                     amount
                 ) {
                     pendingTransfers.delete(
-                        senderId
+                        transferKey
                     );
 
                     return interaction.reply({
@@ -3855,7 +3965,7 @@ client.on(
                     code;
 
                 pendingTransfers.set(
-                    senderId,
+                    transferKey,
                     transfer
                 );
 
@@ -3917,6 +4027,36 @@ process.on(
         );
     }
 );
+
+let shuttingDown = false;
+
+function saveDatabaseBeforeExit() {
+    if (shuttingDown) return;
+    shuttingDown = true;
+
+    try {
+        const db = loadDB();
+
+        for (const guild of client.guilds.cache.values()) {
+            ensureGuildConfig(db, guild.id);
+        }
+
+        saveDB(db);
+        console.log('💾 تم حفظ بيانات العملات وإعدادات الرومات قبل إيقاف البوت.');
+    } catch (error) {
+        console.error('❌ تعذر حفظ قاعدة البيانات قبل إيقاف البوت:', error);
+    }
+}
+
+process.on('SIGINT', () => {
+    saveDatabaseBeforeExit();
+    process.exit(0);
+});
+
+process.on('SIGTERM', () => {
+    saveDatabaseBeforeExit();
+    process.exit(0);
+});
 
 if (!TOKEN) {
     console.error(
